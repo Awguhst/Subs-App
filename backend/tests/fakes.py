@@ -1,4 +1,5 @@
 """Offline stand-ins for ElevenLabs and Anthropic: tests never spend credits."""
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -50,14 +51,20 @@ def api_error(cls, status: int):
 
 
 class FakeAnthropic:
-    """Mimics ``AsyncAnthropic().messages.create``; ``handler(request)`` returns or raises."""
+    """Mimics ``AsyncAnthropic().messages.create``; ``handler(request)`` returns or raises.
 
-    def __init__(self, handler=echo):
-        self.handler, self.calls = handler, []
+    ``latency`` makes each call wait like a real network request, so concurrency
+    and cancellation behave as they do in production.
+    """
+
+    def __init__(self, handler=echo, latency: float = 0.0):
+        self.handler, self.latency, self.calls = handler, latency, []
         self.messages = SimpleNamespace(create=self._create)
 
     async def _create(self, **request):
         self.calls.append(request)
+        if self.latency:
+            await asyncio.sleep(self.latency)
         result = self.handler(request)
         if isinstance(result, Exception):
             raise result

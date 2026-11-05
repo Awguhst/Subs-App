@@ -36,7 +36,7 @@
   h1 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -.8px; margin: 0 0 6px; }
   h2 { font-size: 18px; margin: 0; } h3 { font-size: 14px; margin: 0; }
   .lead, .muted { color: var(--muted); } .lead { margin: 0 0 22px; }
-  .drop { display: grid; place-items: center; gap: 4px; text-align: center; padding: 34px 16px; border: 1.5px dashed var(--line-2);
+  .drop { position: relative; display: grid; place-items: center; gap: 4px; text-align: center; padding: 34px 16px; border: 1.5px dashed var(--line-2);
           border-radius: 12px; background: #0f1018; cursor: pointer; transition: border-color .15s, background .15s; }
   .drop:hover, .drop.over { border-color: var(--accent); background: #151325; }
   .drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
@@ -68,7 +68,7 @@
   .tracks header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
   .tracks header div { display: flex; gap: 6px; } .tracks header button { font-size: 12px; padding: 5px 10px; }
   pre { margin: 0; padding: 14px; max-height: 360px; overflow: auto; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; color: #d9dbe8; }
-  .code { border: 1px solid var(--line); border-radius: 10px; background: #0f1018; margin-top: 14px; }
+  .code { border: 1px solid var(--line); border-radius: 10px; background: #0f1018; margin-top: 16px; max-height: none; }
 </style>
 </head>
 <body>
@@ -117,8 +117,7 @@
 
   <section class="card" aria-labelledby="code-title">
     <h2 id="code-title">Call it from any device</h2>
-    <p class="muted" style="margin:6px 0 0">Send <code>multipart/form-data</code> with a <code>file</code> field. Add <code>?format=vtt&amp;language=bg</code> or <code>en</code> to receive that <code>.vtt</code> file directly; without it, the JSON response has both tracks in <code>subtitles.bg</code> and <code>subtitles.en</code>.</p>
-    <div class="code"><pre id="snippet"></pre></div>
+    <pre class="code" id="snippet"></pre>
   </section>
 </main>
 
@@ -130,7 +129,7 @@ const STAGES = {
   transcribing: "Transcribing Bulgarian speech", segmenting: "Building subtitle cues", translating: "Translating to English",
 };
 const STAGE_BAR = { queued: 32, probing: 34, extracting: 38, transcribing: 45, segmenting: 82, translating: 84 };
-const state = { file: null, result: null, urls: [], timer: null, health: null };
+const state = { file: null, busy: false, result: null, resultFile: null, urls: [], trackUrls: {}, timer: null, health: null };
 
 function fmtSize(bytes) {
   const units = ["B", "KB", "MB", "GB"]; let i = 0;
@@ -163,22 +162,16 @@ async function loadHealth() {
 }
 
 function renderSnippet() {
-  const key = state.health && state.health.auth_required ? ' \\\n  -H "X-API-Key: YOUR_API_KEY"' : "";
-  $("snippet").textContent =
-`# Two ready-to-use files: Bulgarian, then English (the 2nd request is served from cache)
-# (Windows PowerShell: write curl.exe instead of curl)
-curl -X POST "${location.origin}/v1/subtitles?format=vtt&language=bg"${key} \\
-  -F "file=@recording.mp4" -o recording.bg.vtt
-curl -X POST "${location.origin}/v1/subtitles?format=vtt&language=en"${key} \\
-  -F "file=@recording.mp4" -o recording.en.vtt
-
-# Or JSON with both tracks in one response
-curl -X POST "${location.origin}/v1/subtitles"${key} \\
-  -F "file=@recording.mp4"
-
-# Long recordings: stream progress as NDJSON (one JSON object per line)
-curl -N -X POST "${location.origin}/v1/subtitles?stream=true"${key} \\
-  -F "file=@recording.mp4"`;
+  // One line per command: works in bash, cmd and PowerShell alike (-F implies POST).
+  const api = `${location.origin}/v1/subtitles`;
+  const key = state.health && state.health.auth_required ? ' -H "X-API-Key: YOUR_KEY"' : "";
+  const curl = `curl${key} -F "file=@recording.mp4"`;
+  $("snippet").textContent = [
+    `${curl} "${api}?format=vtt&language=bg" -o recording.bg.vtt`,
+    `${curl} "${api}?format=vtt&language=en" -o recording.en.vtt`,
+    `${curl} "${api}"`,
+    `${curl} -N "${api}?stream=true"`,
+  ].join("\n\n");
 }
 
 function pickFile(file) {
@@ -186,13 +179,15 @@ function pickFile(file) {
   state.file = file;
   $("drop-title").textContent = file.name;
   $("drop-hint").textContent = `${fmtSize(file.size)} · ${file.type || "unknown type"}`;
-  $("submit").disabled = false;
-  showError("");
+  $("submit").disabled = state.busy;  // one request at a time
+  if (!state.busy) showError("");
 }
 
 function upload(event) {
   event.preventDefault();
-  if (!state.file) return;
+  if (!state.file || state.busy) return;
+  state.busy = true;
+  const file = state.file;  // the result belongs to this file, even if another is picked meanwhile
   showError(""); $("result").hidden = true; $("progress").hidden = false; $("submit").disabled = true;
   setBar(0); $("stage").textContent = "Uploading…";
   const started = performance.now();
@@ -204,6 +199,7 @@ function upload(event) {
   xhr.open("POST", `/v1/subtitles?${params}`);
   const key = $("key").value.trim();
   if (key) { xhr.setRequestHeader("X-API-Key", key); localStorage.setItem("subtitle-api-key", key); }
+  else localStorage.removeItem("subtitle-api-key");
   let seen = 0, finished = false;
 
   const consume = () => {
@@ -212,10 +208,12 @@ function upload(event) {
     while ((end = text.indexOf("\n", seen)) !== -1) {
       const line = text.slice(seen, end).trim(); seen = end + 1;
       if (!line) continue;
-      try { finished = handleEvent(JSON.parse(line)) || finished; } catch { /* ignore a malformed line */ }
+      let parsed;
+      try { parsed = JSON.parse(line); } catch { continue; /* ignore a malformed line */ }
+      finished = handleEvent(parsed, file) || finished;
     }
   };
-  const done = () => { clearInterval(state.timer); $("submit").disabled = false; };
+  const done = () => { clearInterval(state.timer); state.busy = false; $("submit").disabled = !state.file; };
 
   xhr.upload.onprogress = (e) => {
     if (!e.lengthComputable) return;
@@ -239,11 +237,11 @@ function upload(event) {
   xhr.onerror = () => { done(); $("progress").hidden = true; showError("Network error: the server could not be reached."); };
 
   const form = new FormData();
-  form.append("file", state.file, state.file.name);
+  form.append("file", file, file.name);
   xhr.send(form);
 }
 
-function handleEvent(event) {
+function handleEvent(event, file) {
   if (event.event === "progress") {
     let label = STAGES[event.stage] || event.stage;
     let percent = STAGE_BAR[event.stage] || 40;
@@ -254,46 +252,64 @@ function handleEvent(event) {
     $("stage").textContent = `${label}…`;
     setBar(percent, event.stage === "transcribing" || event.stage === "queued");
   } else if (event.event === "result") {
-    setBar(100); $("stage").textContent = "Done"; render(event.result); return true;
+    setBar(100); $("stage").textContent = "Done"; render(event.result, file); return true;
   } else if (event.event === "error") {
     $("progress").hidden = true; showError(event.detail); return true;
   }
   return false;
 }
 
-function render(result) {
-  state.result = result;
+function render(result, file) {
+  state.result = result; state.resultFile = file;
   const { bg, en } = result.subtitles;
   $("vtt-bg").textContent = bg;
   $("vtt-en").textContent = en ?? (result.translation.status === "failed" ? "No English track (see note above)." : "Not requested.");
   const timing = result.cached ? "reused from an earlier upload" : `processed in ${(result.timings_ms.total / 1000).toFixed(1)} s`;
-  $("meta").textContent = `${result.cue_count} cues · ${fmtTime(result.duration_seconds)} ${result.media_type} · ${timing}`;
+  const length = result.duration_seconds ? `${fmtTime(result.duration_seconds)} ` : "";
+  $("meta").textContent = `${result.cue_count} cues · ${length}${result.media_type} · ${timing}`;
   const note = result.translation.status === "failed" ? `English translation failed: ${result.translation.error}` :
                result.cue_count === 0 ? "No speech was detected in this recording." : "";
   $("note").textContent = note; $("note").hidden = !note;
   for (const button of document.querySelectorAll("[data-copy='en'],[data-download='en'],[data-track='en']")) button.disabled = !en;
 
-  state.urls.forEach((url) => URL.revokeObjectURL(url)); state.urls = [];
-  const player = $("player");
-  player.querySelectorAll("track").forEach((track) => track.remove());
-  const media = URL.createObjectURL(state.file); state.urls.push(media);
-  player.src = media;
-  for (const [lang, label, vtt] of [["bg", "Български", bg], ["en", "English", en]]) {
+  state.urls.forEach((url) => URL.revokeObjectURL(url)); state.urls = []; state.trackUrls = {};
+  const media = URL.createObjectURL(file); state.urls.push(media);
+  $("player").src = media;
+  for (const [lang, vtt] of Object.entries(result.subtitles)) {
     if (!vtt) continue;
-    const track = document.createElement("track");
-    const url = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" })); state.urls.push(url);
-    Object.assign(track, { kind: "subtitles", srclang: lang, label, src: url });
-    player.append(track);
+    const url = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
+    state.urls.push(url); state.trackUrls[lang] = url;
   }
   setTrack("bg");
   $("result").hidden = false;
   $("result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+// Only the selected language is attached to the player. Browsers draw every
+// "showing" track at once, and their automatic caption selection (driven by
+// browser/OS caption preferences) can switch on a second track by itself; with
+// a single <track> element two languages can never appear together.
+const TRACK_LABELS = { bg: "Български", en: "English" };
 function setTrack(lang) {
-  for (const track of $("player").textTracks) track.mode = track.language === lang ? "showing" : "disabled";
+  const player = $("player");
+  player.querySelectorAll("track").forEach((track) => track.remove());
+  const url = state.trackUrls[lang];
+  if (url) {
+    const track = document.createElement("track");
+    Object.assign(track, { kind: "subtitles", srclang: lang, label: TRACK_LABELS[lang], src: url, default: true });
+    player.append(track);
+    track.track.mode = "showing";
+  }
+  showSelectedTrack(url ? lang : "off");
+}
+function showSelectedTrack(lang) {
   for (const button of document.querySelectorAll("[data-track]")) button.setAttribute("aria-pressed", String(button.dataset.track === lang));
 }
+// Keep the buttons truthful when the player's own CC control hides or shows the track.
+$("player").textTracks.addEventListener("change", () => {
+  const track = $("player").textTracks[0];
+  showSelectedTrack(track && track.mode === "showing" ? track.language : "off");
+});
 
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
@@ -310,7 +326,7 @@ document.addEventListener("click", async (event) => {
   } else {
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
-    link.download = `${(state.file?.name || "subtitles").replace(/\.[^.]+$/, "")}.${lang}.vtt`;
+    link.download = `${(state.resultFile?.name || "subtitles").replace(/\.[^.]+$/, "")}.${lang}.vtt`;
     link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
   }
 });

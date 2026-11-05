@@ -95,7 +95,7 @@ class BudgetLedger:
             self._write(data)
             used = sum(e["amount"] for e in data["requests"].values())
             if used + amount > data["cap"]:
-                raise BudgetError("This translation would exceed the app's $20 spending limit (or your lower configured limit). No request was sent to Claude.")
+                raise BudgetError("The translation spending limit is reached (TRANSLATION_BUDGET_USD, at most $20): the next Claude request would exceed it, so it was not sent.")
             token = uuid.uuid4().hex
             data["requests"][token] = {"state": "reserved", "amount": amount,
                                        "job_id": job_id, "revision": revision}

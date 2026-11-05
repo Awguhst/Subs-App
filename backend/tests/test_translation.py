@@ -87,6 +87,30 @@ def test_failure_cancels_other_batches_and_accounts_for_them(tmp_path):
     assert translator.budget_status()["reserved_usd"] == 0  # nothing left dangling
 
 
+def test_batches_cancelled_before_sending_are_not_charged(tmp_path):
+    def handler(request):
+        if cues_of(request)[0]["id"] == 0:
+            return api_error(anthropic.PermissionDeniedError, 403)
+        return echo(request)
+    client = FakeAnthropic(handler, latency=0.05)
+    config = Settings(anthropic_api_key="test-key", data_dir=tmp_path, translation_concurrency=1)
+    translator = Translator(config, client=client)
+    with pytest.raises(TranslationError):
+        run(translator, [f"ред {i}" for i in range(BATCH_CUES * 6)])
+    assert len(client.calls) == 1  # the other five were still waiting for a slot
+    entries = json.loads(translator.ledger.path.read_text())["requests"]
+    assert [e["state"] for e in entries.values()] == ["settled"]
+    assert translator.budget_status()["charged_usd"] == 0 and translator.budget_status()["reserved_usd"] == 0
+
+
+def test_long_recordings_do_not_need_their_whole_worst_case_up_front(tmp_path):
+    # 40 batches x ~$0.04 worst case = ~$1.6, but real cost is ~$0.04: a $1 cap must suffice.
+    translator, client = make(tmp_path, budget=1.0)
+    english = run(translator, [f"ред {i}" for i in range(BATCH_CUES * 40)])
+    assert len(english) == BATCH_CUES * 40 and len(client.calls) == 40
+    assert translator.budget_status()["charged_usd"] == pytest.approx(40 * 0.001)
+
+
 def test_budget_limit_stops_before_any_request(tmp_path):
     translator, client = make(tmp_path, budget=0.01)
     with pytest.raises(TranslationError, match="spending limit"):

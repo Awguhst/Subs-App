@@ -1,7 +1,11 @@
 """End to end through HTTP: real FFmpeg, fake ElevenLabs and Claude (no credits used)."""
+import asyncio
 import hashlib
 import json
+import os
 import re
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -222,8 +226,28 @@ def test_limits_are_enforced(build, media_files, tmp_path):
     ffmpeg("-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "61", "-c:a", "aac", str(long_file))
     with client:
         response = upload(client, long_file)
-    assert response.status_code == 413 and "limit is 1 minutes" in response.json()["detail"]
+    assert response.status_code == 413 and "1-minute limit" in response.json()["detail"]
     assert transcriber.calls == []
+
+
+def test_duration_limit_uses_the_real_length_not_the_files_claim(build, media_files):
+    # Declares ~12 s but holds 75 s of audio: rejected before any paid transcription.
+    client, transcriber, _ = build(max_duration_minutes=1)
+    with client:
+        response = upload(client, media_files["lying_long"], translate="false")
+    assert response.status_code == 413 and transcriber.calls == []
+
+
+def test_speech_past_a_wrong_declared_length_still_gets_subtitles(build, media_files):
+    # Declares ~7 s but holds 30 s; speech continues to 28 s (e.g. VBR phone recordings).
+    words = [{"type": "word", "text": f"дума{i}", "start": i * 2.0, "end": i * 2.0 + 0.5, "speaker_id": "s"}
+             for i in range(15)]
+    client, transcriber, _ = build(transcriber=FakeTranscriber(result={"words": words}))
+    with client:
+        response = upload(client, media_files["lying_short"], translate="false")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["duration_seconds"] == pytest.approx(30, abs=0.5) and "дума14" in body["subtitles"]["bg"]
 
 
 def test_provider_errors_map_to_gateway_statuses(build, media_files):
@@ -261,33 +285,97 @@ def test_health_docs_and_ui(build):
         assert client.get("/", follow_redirects=False).headers["location"] == "/docs"
 
 
+class HeldTranscriber(FakeTranscriber):
+    """Waits until released, so several requests can be in flight at once."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.release = threading.Event()
+
+    async def __call__(self, audio_path):
+        while not self.release.is_set():
+            await asyncio.sleep(0.01)
+        return await super().__call__(audio_path)
+
+
+def send_together(client, transcriber, requests):
+    """POST (path, filename, params) requests in parallel while transcription is held."""
+    results = [None] * len(requests)
+
+    def send(index, path, filename, params):
+        with path.open("rb") as handle:
+            results[index] = client.post("/v1/subtitles", params=params,
+                                         files={"file": (filename, handle, "video/mp4")})
+    threads = [threading.Thread(target=send, args=(i, *request)) for i, request in enumerate(requests)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 10
+    while not client.app.state.service.transcriptions and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.4)  # let the other uploads arrive and join
+    transcriber.release.set()
+    for thread in threads:
+        thread.join(20)
+    return results
+
+
 def test_concurrent_identical_uploads_share_one_transcription(build, media_files):
-    import asyncio
-    import threading
-
-    gate = threading.Event()
-
-    class SlowTranscriber(FakeTranscriber):
-        async def __call__(self, audio_path):
-            while not gate.is_set():
-                await asyncio.sleep(0.01)
-            return await super().__call__(audio_path)
-
-    transcriber = SlowTranscriber()
+    transcriber = HeldTranscriber()
     client, _, _ = build(transcriber=transcriber)
-    results = []
     with client:
-        threads = [threading.Thread(target=lambda: results.append(upload(client, media_files["video"])))
-                   for _ in range(3)]
-        for thread in threads:
-            thread.start()
-        import time
-        deadline = time.monotonic() + 10
-        while len(client.app.state.service.jobs) == 0 and time.monotonic() < deadline:
-            time.sleep(0.01)
-        time.sleep(0.3)  # let all three uploads arrive
-        gate.set()
-        for thread in threads:
-            thread.join(20)
+        results = send_together(client, transcriber, [(media_files["video"], "clip.mp4", {})] * 3)
     assert [r.status_code for r in results] == [200, 200, 200]
     assert len(transcriber.calls) == 1
+
+
+def test_mixed_options_share_one_transcription_and_keep_english(build, media_files):
+    transcriber = HeldTranscriber()
+    client, _, claude = build(transcriber=transcriber)
+    video = media_files["video"]
+    with client:
+        both, bg_only, en_file = send_together(client, transcriber, [
+            (video, "clip.mp4", {}), (video, "clip.mp4", {"translate": "false"}),
+            (video, "clip.mp4", {"format": "vtt", "language": "en"})])
+        assert [r.status_code for r in (both, bg_only, en_file)] == [200, 200, 200]
+        assert len(transcriber.calls) == 1  # not once per option combination
+        assert bg_only.json()["subtitles"]["en"] is None and en_file.text.startswith("WEBVTT")
+        # The Bulgarian-only request must not have erased the English track.
+        later = client.get(f"/v1/subtitles/{both.json()['id']}/en.vtt")
+    assert later.status_code == 200 and later.text == both.json()["subtitles"]["en"]
+    assert len(claude.calls) == 1
+
+
+def test_joined_requests_get_their_own_filename(build, media_files):
+    transcriber = HeldTranscriber()
+    client, _, _ = build(transcriber=transcriber)
+    with client:
+        alice, bob = send_together(client, transcriber, [
+            (media_files["video"], "alice-private-interview.mp4", {"format": "vtt", "language": "bg"}),
+            (media_files["video"], "bob.mp4", {"format": "vtt", "language": "bg"})])
+    assert 'filename="alice-private-interview.bg.vtt"' in alice.headers["content-disposition"]
+    assert 'filename="bob.bg.vtt"' in bob.headers["content-disposition"]
+    assert "alice" not in bob.headers["content-disposition"]
+
+
+def test_raw_upload_accepts_an_unencoded_utf8_filename(build, media_files):
+    client, _, _ = build()
+    with client:
+        response = client.post("/v1/subtitles", content=media_files["video"].read_bytes(),
+                               params={"translate": "false"},
+                               headers={"Content-Type": "application/octet-stream",
+                                        "X-Filename": "запис.mp4".encode("utf-8")})
+    assert response.status_code == 200 and response.json()["filename"] == "запис.mp4"
+
+
+def test_startup_only_removes_stale_temporary_uploads(build, tmp_path):
+    work = tmp_path / "data" / "tmp"
+    fresh, stale = work / "another-process-upload", work / "crash-leftover"
+    for folder in (fresh, stale):
+        folder.mkdir(parents=True)
+        (folder / "upload").write_bytes(b"x")
+    hours_ago = time.time() - 4 * 3600
+    os.utime(stale, (hours_ago, hours_ago))
+    client, _, _ = build()
+    with client:
+        pass
+    assert fresh.is_dir() and not stale.exists()

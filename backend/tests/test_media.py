@@ -26,6 +26,15 @@ def test_browser_recordings_work_and_unknown_durations_are_measured(media_files,
     assert media.extract_audio(media_files["streamed_webm"], tmp_path / "a.mp3", None) == pytest.approx(3, abs=0.1)
 
 
+def test_real_duration_is_measured_and_extraction_is_capped(media_files, tmp_path):
+    declared = media.probe(media_files["lying_short"]).duration
+    assert declared < 15  # the container's estimate is badly wrong...
+    measured = media.extract_audio(media_files["lying_short"], tmp_path / "a.mp3")
+    assert measured == pytest.approx(30, abs=0.5)  # ...the extracted audio is measured
+    capped = media.extract_audio(media_files["lying_long"], tmp_path / "b.mp3", max_seconds=60)
+    assert capped == pytest.approx(61, abs=0.5)  # never decodes (or bills) far past a limit
+
+
 def test_video_without_audio_is_rejected(media_files):
     with pytest.raises(media.MediaError, match="no audio") as error:
         media.probe(media_files["silent_video"])

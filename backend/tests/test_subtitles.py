@@ -55,7 +55,24 @@ def test_long_handle_and_invalid_text():
     with pytest.raises(ValueError):
         wrap_text("x" * 85)
     with pytest.raises(ValueError):
-        validate_cues([{"start": 0, "end": 1, "text": "a\nb\nc"}], 2)
+        validate_cues([{"start": 0, "end": 1, "text": "  "}], 2)
+
+
+def test_unusual_transcripts_never_fail_a_paid_job():
+    def w(text, start, end):
+        return {"type": "word", "text": text, "start": start, "end": end, "speaker_id": "s"}
+    # A spoken URL (one 100-character token) wraps onto extra lines instead of failing.
+    url = "https://example.com/" + "a" * 80
+    cues = generate_cues({"words": [w("Посетете", 0, 0.4), w(url, 0.5, 2.0)]}, 5.0)
+    assert "".join(cues[-1]["text"].split("\n")) == url
+    assert all(len(line) <= 42 for cue in cues for line in cue["text"].splitlines())
+    # A run of zero-length words is kept, however long the joined text becomes.
+    words = [w("Добре", 0, 0.4)] + [w(f"дума{i}", 1 + i * 0.1, 1 + i * 0.1) for i in range(40)] + [w("край", 5.5, 5.9)]
+    text = " ".join(cue["text"].replace("\n", " ") for cue in generate_cues({"words": words}, 7.0))
+    assert "дума39" in text and text.endswith("край")
+    # Decoded audio can be a few ms longer than declared: a word in that tail still gets a cue.
+    cues = generate_cues({"words": [w("Здравейте", 0, 0.5), w("чао", 2.995, 3.05)]}, 2.99)
+    assert cues[-1]["text"] == "чао" and cues[-1]["end"] > cues[-1]["start"]
 
 
 def test_simultaneous_speakers_share_cue_without_overlap():

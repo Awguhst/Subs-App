@@ -151,7 +151,7 @@ The stages are `queued`, `probing`, `extracting`, `transcribing`, `segmenting` a
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /v1/subtitles/{id}` | The finished result for an `id` (200), `202 {"status": "processing", "stage": …}` while running, 404 if unknown/expired |
-| `GET /v1/subtitles/{id}/bg.vtt` · `/en.vtt` | One track as a downloadable `.vtt` file |
+| `GET /v1/subtitles/{id}/bg.vtt` · `/en.vtt` | One track as a downloadable `.vtt` file (202 while still processing, 404 if unknown) |
 | `GET /v1/usage` | Translation spending against the lifetime cap |
 | `GET /health` | Configuration and readiness (always 200 while the server is up) |
 
@@ -215,7 +215,7 @@ Set these as environment variables (Railway variables) or in `.env` for local ru
 | `ANTHROPIC_API_KEY` | – | Needed for English subtitles |
 | `API_KEYS` | – | Comma-separated client keys; when empty the API is open (a startup warning is logged) |
 | `MAX_UPLOAD_MB` | `2048` | Largest accepted upload |
-| `MAX_DURATION_MINUTES` | `240` | Longest accepted recording; rejected before any paid call |
+| `MAX_DURATION_MINUTES` | `240` | Longest accepted recording, measured on the decoded audio rather than the file's own claim; rejected before any paid call |
 | `MAX_CONCURRENT_JOBS` | `2` | Recordings extracted and transcribed at the same time; others wait in `queued` |
 | `TRANSLATION_CONCURRENCY` | `6` | Parallel Claude requests across all jobs |
 | `TRANSLATION_BUDGET_USD` | `20` | Lifetime translation cap for this installation; can be lowered, never above 20 |
@@ -242,7 +242,7 @@ Set these as environment variables (Railway variables) or in `.env` for local ru
 
 ElevenLabs bills transcription per audio minute to your account; check its pricing and limits there. Anthropic translation runs on **Claude Haiku 4.5** ($1 / $5 per million input/output tokens), pinned so the cost accounting stays exact.
 
-Every Claude request first **reserves its worst-case cost** in a persistent ledger (`DATA_DIR/translation-budget.json`, or the earlier `DATA_DIR/jobs/.translation-budget.json` when it exists), then settles to the reported usage. A failed batch (rate limit, overload, server error, timeout or missing lines) gets up to three attempts in total, and only the missing lines are requested again. Rate-limited and overloaded attempts are not charged. Attempts whose outcome is unknown (timeouts, server errors, cancellations) keep their full reservation. When the next request would exceed `TRANSLATION_BUDGET_USD`, translation stops and only Bulgarian is returned (`translation.status: "failed"`). The ledger never resets by itself; do not edit or delete it to regain budget. `GET /v1/usage` shows the totals.
+Every Claude request first **reserves its worst-case cost** in a persistent ledger (`DATA_DIR/translation-budget.json`, or the earlier `DATA_DIR/jobs/.translation-budget.json` when it exists), then settles to the reported usage. A reservation is made only when a request is about to be sent, so at most `TRANSLATION_CONCURRENCY` worst cases are held at once. A failed batch (rate limit, overload, server error, timeout or missing lines) gets up to three attempts in total, and only the missing lines are requested again. Rate-limited and overloaded attempts are not charged. Attempts whose outcome is unknown (timeouts, server errors, cancellations) keep their full reservation. If one batch fails for good, no further requests are sent for that recording. When the next request would exceed `TRANSLATION_BUDGET_USD`, translation stops and only Bulgarian is returned (`translation.status: "failed"`). The ledger never resets by itself; do not edit or delete it to regain budget. `GET /v1/usage` shows the totals.
 
 **Each installation has its own ledger.** The local Docker studio has used $0.55 of its $20 so far, and a Railway deployment starts its own $20 allowance. If you run both and want to stay within a €28 total, lower `TRANSLATION_BUDGET_USD` on one of them (for example to `8` on Railway). Railway's ledger only survives redeploys when a volume is attached.
 
@@ -271,7 +271,7 @@ python -m venv .venv
 cd backend; ..\.venv\Scripts\python.exe -m app      # PORT/HOST from the environment
 ```
 
-The 80 tests run real FFmpeg on synthetic media in the formats phones and browsers produce, with ElevenLabs and Claude replaced by offline fakes, so **tests spend no credits**. They cover:
+The 90 tests run real FFmpeg on synthetic media in the formats phones and browsers produce, with ElevenLabs and Claude replaced by offline fakes, so **tests spend no credits**. They cover:
 
 - the HTTP API end to end: multipart and raw uploads, ready-to-use `.vtt` responses (including Cyrillic filenames), streaming events, caching and de-duplication, auth, limits, error mapping, and cleanup of temporary files;
 - cue segmentation and WebVTT output;

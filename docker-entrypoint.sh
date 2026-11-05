@@ -4,7 +4,13 @@
 # FFmpeg never processes uploads with root privileges.
 set -eu
 
-export DATA_DIR="${DATA_DIR:-${RAILWAY_VOLUME_MOUNT_PATH:-/data}}"
+DATA_DIR="${DATA_DIR:-${RAILWAY_VOLUME_MOUNT_PATH:-/data}}"
+# The app resolves a relative DATA_DIR against /app; use the same absolute path here.
+case "$DATA_DIR" in
+    /*) ;;
+    *) DATA_DIR="/app/${DATA_DIR#./}" ;;
+esac
+export DATA_DIR
 
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$DATA_DIR"

@@ -180,7 +180,7 @@ def create_app(settings: Settings | None = None, *, transcriber=None, translator
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        shutil.rmtree(settings.data_dir / "tmp", ignore_errors=True)  # leftovers of a crash
+        _remove_stale_uploads(settings.data_dir / "tmp")
         service.cache.sweep()
         _log_startup_warnings(settings)
         yield
@@ -257,6 +257,8 @@ def create_app(settings: Settings | None = None, *, transcriber=None, translator
             result = await asyncio.shield(job.task)
         except PipelineError as exc:
             raise HTTPException(exc.status, exc.detail) from None
+        # A request that joined someone else's identical upload gets its own filename back.
+        result = {**result, "filename": upload.filename}
         if format == "json":
             return result
         vtt = result["subtitles"][language]
@@ -271,25 +273,28 @@ def create_app(settings: Settings | None = None, *, transcriber=None, translator
                         404: {"description": "Unknown or expired id"}})
     async def get_subtitles(id: str = Path(pattern=SHA256, description="The `id` (SHA-256 of the file)")):
         """Returns a finished result (kept for `CACHE_TTL_HOURS`), or 202 while it is processing."""
-        state, data = service.status(id)
-        if state == "processing":
-            return JSONResponse({"id": id, "status": "processing", **data}, status_code=202)
-        if state == "unknown":
+        entry, progress = service.status(id)
+        if progress and not (entry and entry.get("en")):
+            return JSONResponse({"id": id, "status": "processing", **progress}, status_code=202)
+        if entry is None:
             raise HTTPException(404, "No result for this id. It may have expired; upload the file again.")
-        translation = ({"status": "complete", "model": data.get("en_model"), "error": None} if data.get("en")
+        translation = ({"status": "complete", "model": entry.get("en_model"), "error": None} if entry.get("en")
                        else {"status": "skipped", "model": None, "error": None})
-        return build_result(data, True, translation, True, {})
+        return build_result(entry, True, translation, True, {})
 
     @app.get("/v1/subtitles/{id}/{language}.vtt", tags=["Subtitles"], dependencies=[auth],
              summary="Download one track as a .vtt file",
-             responses={200: {"content": {"text/vtt": {}}}, 404: {"description": "Not available"}},
+             responses={200: {"content": {"text/vtt": {}}}, 202: {"model": Processing, "description": "Still processing"},
+                        404: {"description": "Not available"}},
              response_class=Response)
     async def download_track(id: str = Path(pattern=SHA256), language: Literal["bg", "en"] = Path()):
-        state, data = service.status(id)
-        vtt = data.get(language) if state == "complete" else None
-        if not vtt:
-            raise HTTPException(404, "This track is not available. Create it with POST /v1/subtitles first.")
-        return _vtt_file(vtt, data.get("filename"), language, {"X-Subtitle-Id": id})
+        entry, progress = service.status(id)
+        vtt = entry.get(language) if entry else None
+        if vtt:
+            return _vtt_file(vtt, entry.get("filename"), language, {"X-Subtitle-Id": id})
+        if progress:
+            return JSONResponse({"id": id, "status": "processing", **progress}, status_code=202)
+        raise HTTPException(404, "This track is not available. Create it with POST /v1/subtitles first.")
 
     @app.get("/v1/usage", tags=["Service"], dependencies=[auth], response_model=Usage,
              summary="Translation spending against the lifetime cap")
@@ -318,6 +323,24 @@ def create_app(settings: Settings | None = None, *, transcriber=None, translator
         return RedirectResponse("/docs")
 
     return app
+
+
+def _remove_stale_uploads(directory, max_age_hours: float = 3):
+    """Delete upload folders left behind by a crash. Recent ones may belong to
+    another process sharing this data directory, so only old ones are removed."""
+    if not directory.is_dir():
+        return
+    cutoff = time.time() - max_age_hours * 3600
+    for path in directory.iterdir():
+        try:
+            if path.stat().st_mtime >= cutoff:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink()
+        except OSError:
+            pass
 
 
 def _vtt_file(vtt: str, filename: str | None, language: str, headers: dict[str, str]) -> Response:
@@ -356,7 +379,7 @@ async def _events(job: Job, upload: Upload):
                 break
             yield line({"event": "progress", **event, "elapsed_seconds": elapsed()})
         try:
-            yield line({"event": "result", "result": job.task.result()})
+            yield line({"event": "result", "result": {**job.task.result(), "filename": upload.filename}})
         except PipelineError as exc:
             yield line({"event": "error", "status": exc.status, "detail": exc.detail})
         except Exception:

@@ -35,6 +35,15 @@ def media_files(tmp_path_factory):
     with files["streamed_webm"].open("wb") as handle:
         subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *tone, "-t", "3", "-c:a", "libopus",
                         "-f", "webm", "pipe:1"], check=True, stdout=handle, timeout=60)
+    # MP3s whose declared length is a wrong estimate: a 320 kbit/s start followed
+    # by 32 kbit/s audio, with no Xing header, so FFprobe guesses from the first
+    # frames and reports far less than the real duration.
+    start, rest = folder / "hi.mp3", folder / "lo.mp3"
+    ffmpeg(*tone, "-t", "5", "-c:a", "libmp3lame", "-b:a", "320k", "-write_xing", "0", str(start))
+    for name, seconds in (("lying_short", 25), ("lying_long", 70)):
+        ffmpeg(*tone, "-t", str(seconds), "-c:a", "libmp3lame", "-b:a", "32k", "-write_xing", "0", str(rest))
+        files[name] = folder / f"{name}.mp3"
+        files[name].write_bytes(start.read_bytes() + rest.read_bytes())
     files["playlist"] = folder / "evil.m3u8"
     files["playlist"].write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\n{files['audio'].name}\n#EXT-X-ENDLIST\n")
     files["text"] = folder / "notes.mp4"

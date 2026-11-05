@@ -76,7 +76,6 @@ def parse_words(response: dict) -> list[dict]:
         end = _number(entry.get("end"), "Word end")
         if start < 0 or end < start:
             raise ValueError("ElevenLabs returned invalid word timestamps.")
-        wrap_text(text)  # Fail clearly on a malformed/implausibly long token.
         words.append({"start": start, "end": end, "text": text,
                       "speaker_id": entry.get("speaker_id")})
     if not words:
@@ -122,6 +121,10 @@ def generate_cues(response: dict, duration: float | None = None) -> list[dict]:
     words = parse_words(response)
     if not words:
         return []
+    if duration is not None:
+        # Decoded audio can run a few milliseconds past the declared length
+        # (encoder padding); never let that clamp a real word into a zero cue.
+        duration = max(_number(duration, "Video duration"), max(word["end"] for word in words))
     groups: list[list[dict]] = []
     current: list[dict] = []
     for word in words:
@@ -159,7 +162,7 @@ def generate_cues(response: dict, duration: float | None = None) -> list[dict]:
         next_start = groups[index + 1][0]["start"] if index + 1 < len(groups) else math.inf
         if duration is not None:
             next_start = min(next_start, _number(duration, "Video duration"))
-        text = wrap_text(_join_words(group))
+        text = wrap_lines(_join_words(group))
         ideal_end = start + max(0.85, len(text.replace("\n", " ")) / 18)
         end = min(max(spoken_end, min(ideal_end, spoken_end + 1.0)), next_start)
         # Overlapping speakers are displayed in chronological order; impossible
@@ -193,12 +196,12 @@ def validate_cues(cues: list[dict], duration: float | None = None) -> list[dict]
         if not isinstance(cue.get("text"), str):
             raise ValueError(f"Cue {index} text must be a string.")
         raw_lines = cue["text"].replace("\r\n", "\n").split("\n")
-        if len(raw_lines) > 2:
-            raise ValueError(f"Cue {index} may have at most two lines.")
-        if len(raw_lines) == 2 and all(_clean_text(line) and len(_clean_text(line)) <= MAX_LINE for line in raw_lines):
+        if len(raw_lines) > 1 and all(_clean_text(line) and len(_clean_text(line)) <= MAX_LINE for line in raw_lines):
             text = "\n".join(_clean_text(line) for line in raw_lines)
         else:
-            text = wrap_text(cue["text"])
+            text = wrap_lines(cue["text"])
+        if not text:
+            raise ValueError(f"Cue {index} has no text.")
         clean = {"start": start, "end": end, "text": text}
         if cue.get("speaker_id") is not None:
             clean["speaker_id"] = str(cue["speaker_id"])
@@ -231,12 +234,15 @@ def to_vtt(cues: list[dict]) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
-def wrap_english(text: str) -> str:
-    """Wrap a translation like the source: two balanced lines of at most 42
-    characters when possible; longer translations wrap onto further lines
-    rather than being cut."""
+def wrap_lines(text: str) -> str:
+    """Two balanced lines of at most 42 characters when possible. Text that
+    cannot fit (a long translation, or an unbroken token such as a spoken URL)
+    wraps onto further lines rather than being cut or failing the job."""
     text = _clean_text(text)
     try:
         return wrap_text(text)
     except ValueError:
         return "\n".join(textwrap.wrap(text, MAX_LINE, break_long_words=True, break_on_hyphens=False))
+
+
+wrap_english = wrap_lines

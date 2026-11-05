@@ -80,7 +80,12 @@ async def receive_upload(request: Request, directory: Path, limit: int) -> Uploa
         if mime == b"multipart/form-data":
             filename = await _receive_multipart(request, sink, options.get(b"boundary"))
         else:
-            filename = unquote(request.headers.get("x-filename", ""))
+            filename = request.headers.get("x-filename", "")
+            try:  # headers arrive as Latin-1; a client may have sent raw UTF-8 bytes
+                filename = filename.encode("latin-1").decode("utf-8")
+            except UnicodeError:
+                pass
+            filename = unquote(filename)
             async for chunk in request.stream():
                 sink.feed(chunk)
                 await sink.flush()

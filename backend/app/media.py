@@ -85,24 +85,30 @@ def probe(path: str | Path) -> MediaInfo:
     return MediaInfo("video" if video else "audio", duration, True, str(fmt.get("format_name", "")))
 
 
-def extract_audio(source: str | Path, target: str | Path, duration: float | None = None) -> float | None:
-    """Write 16 kHz mono MP3 (~29 MB per hour) for transcription; return its duration.
+def extract_audio(source: str | Path, target: str | Path, max_seconds: float | None = None) -> float:
+    """Write 16 kHz mono MP3 (~29 MB per hour) for transcription; return its real duration.
 
     Speech recognition needs neither video nor high-fidelity audio, so this keeps
     the upload to ElevenLabs small. LAME's faster algorithm (compression level 7)
     is ~2.5x quicker than the default with no meaningful loss for speech.
+
+    The duration is measured on the written MP3 (its header has the exact frame
+    count), never taken from the upload: containers may omit it (MediaRecorder
+    WebM) or only estimate it (VBR MP3 without a Xing header, ADTS AAC). With
+    ``max_seconds``, extraction stops just past the limit so an over-long file is
+    never decoded, uploaded or billed in full.
     """
     target = Path(target).resolve()
-    timeout = 120 + (duration or 4 * 3600) / 4
+    limit = ["-t", f"{max_seconds + 1:.3f}"] if max_seconds else []
+    timeout = 120 + (max_seconds or 10 * 3600) / 4
     result = _run([_binary("ffmpeg"), "-hide_banner", "-nostdin", "-y", "-v", "error", *SAFE_INPUT,
                    "-i", str(Path(source).resolve()), "-map", "0:a:0", "-vn", "-sn", "-dn",
                    "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000",
                    "-c:a", "libmp3lame", "-b:a", "64k", "-compression_level", "7",
-                   "-map_metadata", "-1", str(target)], timeout=timeout)
+                   "-map_metadata", "-1", *limit, str(target)], timeout=timeout)
     if result.returncode or not target.is_file() or target.stat().st_size == 0:
         raise MediaError("The audio track could not be decoded. " + result.stderr[-400:].strip(), status=422)
-    if duration is not None:
-        return duration
-    # Browser/phone recordings (e.g. MediaRecorder WebM) often lack a duration
-    # header; the freshly written MP3 always has one.
-    return probe(target).duration
+    duration = probe(target).duration
+    if not duration:
+        raise MediaError("The audio track is empty.", status=422)
+    return duration

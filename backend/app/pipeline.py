@@ -82,6 +82,12 @@ class ResultCache:
     def put(self, key: str, entry: dict):
         if not self.enabled:
             return
+        if entry.get("en") is None:
+            # Never let a Bulgarian-only write discard an English track that
+            # another request already produced for the same transcript.
+            old = self.get(key)
+            if old and old.get("en") and old.get("bg") == entry.get("bg"):
+                entry = {**entry, "en": old["en"], "en_model": old.get("en_model")}
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self._path(key).with_suffix(f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
@@ -105,7 +111,8 @@ class SubtitleService:
         self.translator = translator     # .translate(texts, label, on_progress) -> list[str]
         self.cache = ResultCache(settings.data_dir / "cache", settings.cache_ttl_hours)
         self.slots = asyncio.Semaphore(settings.max_concurrent_jobs)
-        self.jobs: dict[str, Job] = {}
+        self.jobs: dict[str, Job] = {}                       # "<sha>:<translate>" -> whole request job
+        self.transcriptions: dict[str, asyncio.Task] = {}    # "<sha>" -> shared transcription
 
     # ----- job management -------------------------------------------------
     def submit(self, upload: Upload, translate: bool) -> Job:
@@ -129,14 +136,11 @@ class SubtitleService:
         task.add_done_callback(finished)
         return job
 
-    def status(self, sha256: str) -> tuple[str, Any]:
-        for key, job in self.jobs.items():
-            if key.startswith(sha256 + ":"):
-                return "processing", {**job.last, "elapsed_seconds": round(time.monotonic() - job.started, 1)}
-        entry = self.cache.get(sha256)
-        if entry is None:
-            return "unknown", None
-        return "complete", entry
+    def status(self, sha256: str) -> tuple[dict | None, Event | None]:
+        """(stored result or None, progress of a running job for this file or None)."""
+        progress = next(({**job.last, "elapsed_seconds": round(time.monotonic() - job.started, 1)}
+                         for key, job in self.jobs.items() if key.startswith(sha256 + ":")), None)
+        return self.cache.get(sha256), progress
 
     # ----- the pipeline ---------------------------------------------------
     async def _process(self, upload: Upload, translate: bool, emit: Callable[[Event], None]) -> dict:
@@ -152,10 +156,8 @@ class SubtitleService:
             entry = self.cache.get(upload.sha256)
             cached = entry is not None
             if entry is None:
-                emit({"stage": "queued"})
-                async with self.slots:
-                    entry = await self._transcribe(upload, emit, lap)
-                self.cache.put(upload.sha256, entry)
+                entry = await self._shared_transcription(upload, emit, lap)
+            entry = dict(entry)  # this request's own copy
             translation = {"status": "skipped", "model": None, "error": None}
             if translate and entry["cues"]:
                 if entry.get("en") is None:
@@ -171,20 +173,46 @@ class SubtitleService:
         finally:
             shutil.rmtree(upload.path.parent, ignore_errors=True)
 
+    async def _shared_transcription(self, upload: Upload, emit, lap) -> dict:
+        """Transcribe each file once, however many requests (with any options) want it."""
+        sha = upload.sha256
+        task = self.transcriptions.get(sha)
+        if task is None:
+            async def run() -> dict:
+                emit({"stage": "queued"})
+                async with self.slots:
+                    entry = await self._transcribe(upload, emit, lap)
+                self.cache.put(sha, entry)
+                return entry
+
+            task = self.transcriptions[sha] = asyncio.create_task(run())
+
+            def done(finished: asyncio.Task):
+                if self.transcriptions.get(sha) is finished:
+                    del self.transcriptions[sha]
+                if not finished.cancelled():
+                    finished.exception()  # retrieved here; every waiter re-raises it
+            task.add_done_callback(done)
+        else:
+            emit({"stage": "transcribing"})
+        return await asyncio.shield(task)
+
     async def _transcribe(self, upload: Upload, emit, lap) -> dict:
         mark = time.perf_counter()
         emit({"stage": "probing"})
+        limit_minutes = self.settings.max_duration_minutes
+        too_long = PipelineError(413, f"The media is longer than the {limit_minutes}-minute limit.")
         try:
             info = await asyncio.to_thread(media.probe, upload.path)
-            limit = self.settings.max_duration_minutes * 60
-            if info.duration and info.duration > limit:
-                raise PipelineError(413, f"The media is {info.duration / 60:.0f} minutes long; "
-                                         f"the limit is {self.settings.max_duration_minutes} minutes.")
+            if info.duration and info.duration > limit_minutes * 60:
+                raise too_long  # declared length already over: skip the extraction
             emit({"stage": "extracting"})
             audio = upload.path.with_name("audio.mp3")
-            duration = await asyncio.to_thread(media.extract_audio, upload.path, audio, info.duration)
-            if duration and duration > limit:
-                raise PipelineError(413, f"The media is longer than {self.settings.max_duration_minutes} minutes.")
+            # The declared length can be missing or wrong (VBR/ADTS estimates), so the
+            # limit is enforced on the measured audio, and extraction stops just past it.
+            duration = await asyncio.to_thread(media.extract_audio, upload.path, audio, limit_minutes * 60)
+            if duration > limit_minutes * 60:
+                raise too_long
         except media.MediaError as exc:
             raise PipelineError(exc.status, str(exc)) from None
         upload.path.unlink(missing_ok=True)  # free disk before the long remote step
