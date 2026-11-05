@@ -1,0 +1,15 @@
+# Only backend/app, backend/requirements.txt, frontend/index.html and the
+# entrypoint are copied into the image; keep everything else out of the context.
+.git
+.env
+.env.*
+.venv
+.tmp
+.logs
+**/__pycache__
+**/.pytest_cache
+**/*.py[cod]
+backend/tests
+data
+frontend/node_modules
+*.tar.gz

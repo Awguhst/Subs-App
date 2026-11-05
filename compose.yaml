@@ -1,0 +1,19 @@
+# Local Docker deployment. Reuses the studio-data volume of the earlier
+# Subtitle Studio so the lifetime translation spending ledger carries over.
+services:
+  studio:
+    build: .
+    image: bulgarian-subtitle-api
+    ports:
+      # Set STUDIO_BIND=0.0.0.0 to reach it from phones on the same network.
+      - "${STUDIO_BIND:-127.0.0.1}:${STUDIO_PORT:-8765}:8000"
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - studio-data:/data
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  studio-data:

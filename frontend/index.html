@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Bulgarian Subtitle API · Test console</title>
+<style>
+  :root {
+    --bg: #0c0d13; --panel: #12131c; --panel-2: #181a25; --line: #262837; --line-2: #343749;
+    --ink: #f0f1f7; --muted: #a1a3b8; --accent: #a78bfa; --accent-ink: #171025;
+    --ok: #65d1aa; --warn: #d4ab70; --err: #f19a9a;
+    --mono: "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-width: 320px; color: var(--ink); font: 15px/1.55 Inter, "Segoe UI", system-ui, sans-serif;
+         background: radial-gradient(ellipse 70% 420px at 62% 0, #44315b26, transparent), var(--bg); -webkit-font-smoothing: antialiased; }
+  a { color: var(--ink); }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line-2); background: var(--panel-2); border-radius: 8px; padding: 7px 12px; }
+  button:hover:not(:disabled) { border-color: #4a4d63; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid #bba6ff; outline-offset: 3px; }
+  [hidden] { display: none !important; }
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+         padding: 16px clamp(16px, 4vw, 40px); border-bottom: 1px solid #1f2130; background: #0e0f16cc; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px; }
+  .logo { font: 600 11px var(--mono); letter-spacing: .5px; padding: 4px 7px; border-radius: 6px; background: #2a2140; color: #cdbdfd; }
+  nav { display: flex; align-items: center; gap: 18px; font-size: 13px; }
+  nav a { color: var(--muted); text-decoration: none; } nav a:hover { color: var(--ink); }
+  .status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+  .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+  .status.ok::before { background: var(--ok); } .status.bad::before { background: var(--err); }
+  main { max-width: 1040px; margin: 0 auto; padding: clamp(18px, 4vw, 36px) clamp(14px, 4vw, 40px) 60px; display: grid; gap: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: clamp(18px, 3vw, 28px); }
+  h1 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -.8px; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin: 0; } h3 { font-size: 14px; margin: 0; }
+  .lead, .muted { color: var(--muted); } .lead { margin: 0 0 22px; }
+  .drop { display: grid; place-items: center; gap: 4px; text-align: center; padding: 34px 16px; border: 1.5px dashed var(--line-2);
+          border-radius: 12px; background: #0f1018; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #151325; }
+  .drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .drop:focus-within { outline: 2px solid #bba6ff; outline-offset: 3px; }
+  .drop-title { font-weight: 600; word-break: break-word; } .drop-hint { color: var(--muted); font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 24px; margin: 16px 0; }
+  .check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .check input { accent-color: var(--accent); width: 16px; height: 16px; }
+  .key { display: inline-flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
+  .key input { width: min(320px, 60vw); padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line-2); background: #0f1018; }
+  .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; padding: 10px 20px; }
+  .primary:hover:not(:disabled) { background: #b9a2fb; }
+  .progress { margin-top: 18px; }
+  .bar { height: 6px; border-radius: 99px; background: var(--panel-2); overflow: hidden; }
+  .bar span { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width .3s; }
+  .bar.busy span { background: linear-gradient(90deg, var(--accent), #d7c9ff, var(--accent)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .progress p { margin: 8px 0 0; font-size: 14px; }
+  .error { color: var(--err); margin: 16px 0 0; } .warn { color: var(--warn); margin: 0 0 14px; }
+  .result-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .result-head p { margin: 0; font-size: 13px; }
+  video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; }
+  .seg { display: inline-flex; margin: 12px 0 20px; border: 1px solid var(--line-2); border-radius: 9px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; background: transparent; padding: 7px 16px; color: var(--muted); }
+  .seg button + button { border-left: 1px solid var(--line-2); }
+  .seg button[aria-pressed="true"] { background: #2a2140; color: var(--ink); }
+  .tracks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .tracks article { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0f1018; }
+  .tracks header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .tracks header div { display: flex; gap: 6px; } .tracks header button { font-size: 12px; padding: 5px 10px; }
+  pre { margin: 0; padding: 14px; max-height: 360px; overflow: auto; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; color: #d9dbe8; }
+  .code { border: 1px solid var(--line); border-radius: 10px; background: #0f1018; margin-top: 14px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">BG → EN</span>Bulgarian Subtitle API</div>
+  <nav><span id="status" class="status" role="status">Checking…</span><a href="/docs">API docs</a><a href="/redoc">Reference</a></nav>
+</header>
+
+<main>
+  <section class="card" aria-labelledby="title">
+    <h1 id="title">Test the API</h1>
+    <p class="lead">Upload audio or video with Bulgarian speech. One request returns Bulgarian and English WebVTT subtitles.</p>
+    <form id="form">
+      <label class="drop" id="drop">
+        <input id="file" type="file" accept="audio/*,video/*,.mkv,.mov,.m4a,.opus,.amr,.3gp,.caf">
+        <span class="drop-title" id="drop-title">Choose a file or drop it here</span>
+        <span class="drop-hint" id="drop-hint">Video or audio · up to <span id="max-mb">2048</span> MB</span>
+      </label>
+      <div class="row">
+        <label class="check"><input type="checkbox" id="translate" checked> Include English translation</label>
+        <label class="key" id="key-row" hidden>API key <input id="key" type="password" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <button id="submit" class="primary" type="submit" disabled>Generate subtitles</button>
+    </form>
+    <div id="progress" class="progress" hidden>
+      <div class="bar" id="bar-wrap"><span id="bar"></span></div>
+      <p aria-live="polite"><span id="stage">Uploading…</span> <span id="elapsed" class="muted"></span></p>
+    </div>
+    <p id="error" class="error" role="alert" hidden></p>
+  </section>
+
+  <section class="card" id="result" hidden aria-labelledby="result-title">
+    <div class="result-head"><h2 id="result-title">Result</h2><p id="meta" class="muted"></p></div>
+    <p id="note" class="warn" hidden></p>
+    <video id="player" controls playsinline preload="metadata"></video>
+    <div class="seg" role="group" aria-label="Subtitles shown in the preview">
+      <button type="button" data-track="bg" aria-pressed="true">Bulgarian</button>
+      <button type="button" data-track="en" aria-pressed="false">English</button>
+      <button type="button" data-track="off" aria-pressed="false">Off</button>
+    </div>
+    <div class="tracks">
+      <article><header><h3>Bulgarian</h3><div><button type="button" data-copy="bg">Copy</button><button type="button" data-download="bg">Download .vtt</button></div></header><pre id="vtt-bg"></pre></article>
+      <article><header><h3>English</h3><div><button type="button" data-copy="en">Copy</button><button type="button" data-download="en">Download .vtt</button></div></header><pre id="vtt-en"></pre></article>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="code-title">
+    <h2 id="code-title">Call it from any device</h2>
+    <p class="muted" style="margin:6px 0 0">Send <code>multipart/form-data</code> with a <code>file</code> field. Add <code>?format=vtt&amp;language=bg</code> or <code>en</code> to receive that <code>.vtt</code> file directly; without it, the JSON response has both tracks in <code>subtitles.bg</code> and <code>subtitles.en</code>.</p>
+    <div class="code"><pre id="snippet"></pre></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const STAGES = {
+  queued: "Waiting for a free worker", probing: "Reading the file", extracting: "Extracting audio",
+  transcribing: "Transcribing Bulgarian speech", segmenting: "Building subtitle cues", translating: "Translating to English",
+};
+const STAGE_BAR = { queued: 32, probing: 34, extracting: 38, transcribing: 45, segmenting: 82, translating: 84 };
+const state = { file: null, result: null, urls: [], timer: null, health: null };
+
+function fmtSize(bytes) {
+  const units = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
+}
+function fmtTime(seconds) {
+  seconds = Math.round(seconds || 0);
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return m ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+function showError(message) { $("error").textContent = message; $("error").hidden = !message; }
+function setBar(percent, busy) { $("bar").style.width = `${Math.min(100, percent)}%`; $("bar-wrap").classList.toggle("busy", !!busy); }
+
+async function loadHealth() {
+  const status = $("status");
+  try {
+    const health = state.health = await (await fetch("/health")).json();
+    $("max-mb").textContent = health.limits.max_upload_mb;
+    $("key-row").hidden = !health.auth_required;
+    const ready = health.status === "ok";
+    status.textContent = !ready ? "Not configured" : health.translation_configured ? "Ready" : "Ready · Bulgarian only";
+    status.className = `status ${ready ? "ok" : "bad"}`;
+    if (!health.transcription_configured) showError("The server has no ELEVENLABS_API_KEY, so it cannot transcribe yet.");
+    else if (!health.ffmpeg_available) showError("FFmpeg is not installed on the server.");
+  } catch {
+    status.textContent = "Offline"; status.className = "status bad";
+  }
+  renderSnippet();
+}
+
+function renderSnippet() {
+  const key = state.health && state.health.auth_required ? ' \\\n  -H "X-API-Key: YOUR_API_KEY"' : "";
+  $("snippet").textContent =
+`# Two ready-to-use files: Bulgarian, then English (the 2nd request is served from cache)
+# (Windows PowerShell: write curl.exe instead of curl)
+curl -X POST "${location.origin}/v1/subtitles?format=vtt&language=bg"${key} \\
+  -F "file=@recording.mp4" -o recording.bg.vtt
+curl -X POST "${location.origin}/v1/subtitles?format=vtt&language=en"${key} \\
+  -F "file=@recording.mp4" -o recording.en.vtt
+
+# Or JSON with both tracks in one response
+curl -X POST "${location.origin}/v1/subtitles"${key} \\
+  -F "file=@recording.mp4"
+
+# Long recordings: stream progress as NDJSON (one JSON object per line)
+curl -N -X POST "${location.origin}/v1/subtitles?stream=true"${key} \\
+  -F "file=@recording.mp4"`;
+}
+
+function pickFile(file) {
+  if (!file) return;
+  state.file = file;
+  $("drop-title").textContent = file.name;
+  $("drop-hint").textContent = `${fmtSize(file.size)} · ${file.type || "unknown type"}`;
+  $("submit").disabled = false;
+  showError("");
+}
+
+function upload(event) {
+  event.preventDefault();
+  if (!state.file) return;
+  showError(""); $("result").hidden = true; $("progress").hidden = false; $("submit").disabled = true;
+  setBar(0); $("stage").textContent = "Uploading…";
+  const started = performance.now();
+  clearInterval(state.timer);
+  state.timer = setInterval(() => { $("elapsed").textContent = fmtTime((performance.now() - started) / 1000); }, 500);
+
+  const params = new URLSearchParams({ stream: "true", translate: String($("translate").checked) });
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", `/v1/subtitles?${params}`);
+  const key = $("key").value.trim();
+  if (key) { xhr.setRequestHeader("X-API-Key", key); localStorage.setItem("subtitle-api-key", key); }
+  let seen = 0, finished = false;
+
+  const consume = () => {
+    const text = xhr.responseText;
+    let end;
+    while ((end = text.indexOf("\n", seen)) !== -1) {
+      const line = text.slice(seen, end).trim(); seen = end + 1;
+      if (!line) continue;
+      try { finished = handleEvent(JSON.parse(line)) || finished; } catch { /* ignore a malformed line */ }
+    }
+  };
+  const done = () => { clearInterval(state.timer); $("submit").disabled = false; };
+
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const percent = (e.loaded / e.total) * 100;
+    setBar(percent * 0.3); $("stage").textContent = `Uploading ${percent.toFixed(0)}%`;
+  };
+  xhr.upload.onload = () => { $("stage").textContent = "Uploaded · starting"; setBar(30); };
+  xhr.onprogress = () => { if (xhr.status === 200) consume(); };
+  xhr.onload = () => {
+    done();
+    if (xhr.status === 200) {
+      consume();
+      if (!finished) showError("The connection ended before a result arrived. Upload the same file again: finished work is reused.");
+      return;
+    }
+    let detail = `Request failed (HTTP ${xhr.status}).`;
+    try { const body = JSON.parse(xhr.responseText); if (body.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail); } catch {}
+    if (xhr.status === 401) { $("key-row").hidden = false; $("key").focus(); }
+    $("progress").hidden = true; showError(detail);
+  };
+  xhr.onerror = () => { done(); $("progress").hidden = true; showError("Network error: the server could not be reached."); };
+
+  const form = new FormData();
+  form.append("file", state.file, state.file.name);
+  xhr.send(form);
+}
+
+function handleEvent(event) {
+  if (event.event === "progress") {
+    let label = STAGES[event.stage] || event.stage;
+    let percent = STAGE_BAR[event.stage] || 40;
+    if (event.stage === "translating" && event.total) {
+      label += ` (${event.completed}/${event.total})`;
+      percent = 84 + 15 * (event.completed / event.total);
+    }
+    $("stage").textContent = `${label}…`;
+    setBar(percent, event.stage === "transcribing" || event.stage === "queued");
+  } else if (event.event === "result") {
+    setBar(100); $("stage").textContent = "Done"; render(event.result); return true;
+  } else if (event.event === "error") {
+    $("progress").hidden = true; showError(event.detail); return true;
+  }
+  return false;
+}
+
+function render(result) {
+  state.result = result;
+  const { bg, en } = result.subtitles;
+  $("vtt-bg").textContent = bg;
+  $("vtt-en").textContent = en ?? (result.translation.status === "failed" ? "No English track (see note above)." : "Not requested.");
+  const timing = result.cached ? "reused from an earlier upload" : `processed in ${(result.timings_ms.total / 1000).toFixed(1)} s`;
+  $("meta").textContent = `${result.cue_count} cues · ${fmtTime(result.duration_seconds)} ${result.media_type} · ${timing}`;
+  const note = result.translation.status === "failed" ? `English translation failed: ${result.translation.error}` :
+               result.cue_count === 0 ? "No speech was detected in this recording." : "";
+  $("note").textContent = note; $("note").hidden = !note;
+  for (const button of document.querySelectorAll("[data-copy='en'],[data-download='en'],[data-track='en']")) button.disabled = !en;
+
+  state.urls.forEach((url) => URL.revokeObjectURL(url)); state.urls = [];
+  const player = $("player");
+  player.querySelectorAll("track").forEach((track) => track.remove());
+  const media = URL.createObjectURL(state.file); state.urls.push(media);
+  player.src = media;
+  for (const [lang, label, vtt] of [["bg", "Български", bg], ["en", "English", en]]) {
+    if (!vtt) continue;
+    const track = document.createElement("track");
+    const url = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" })); state.urls.push(url);
+    Object.assign(track, { kind: "subtitles", srclang: lang, label, src: url });
+    player.append(track);
+  }
+  setTrack("bg");
+  $("result").hidden = false;
+  $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function setTrack(lang) {
+  for (const track of $("player").textTracks) track.mode = track.language === lang ? "showing" : "disabled";
+  for (const button of document.querySelectorAll("[data-track]")) button.setAttribute("aria-pressed", String(button.dataset.track === lang));
+}
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button || !state.result) return;
+  const { copy, download, track } = button.dataset;
+  if (track) setTrack(track);
+  const lang = copy || download;
+  const vtt = lang && state.result.subtitles[lang];
+  if (!vtt) return;
+  if (copy) {
+    try { await navigator.clipboard.writeText(vtt); button.textContent = "Copied"; }
+    catch { button.textContent = "Copy failed"; }
+    setTimeout(() => { button.textContent = "Copy"; }, 1500);
+  } else {
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
+    link.download = `${(state.file?.name || "subtitles").replace(/\.[^.]+$/, "")}.${lang}.vtt`;
+    link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }
+});
+
+const drop = $("drop");
+$("file").addEventListener("change", (e) => pickFile(e.target.files[0]));
+for (const type of ["dragenter", "dragover"]) drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add("over"); });
+for (const type of ["dragleave", "drop"]) drop.addEventListener(type, () => drop.classList.remove("over"));
+drop.addEventListener("drop", (e) => { e.preventDefault(); pickFile(e.dataTransfer.files[0]); });
+$("form").addEventListener("submit", upload);
+$("key").value = localStorage.getItem("subtitle-api-key") || "";
+loadHealth();
+</script>
+</body>
+</html>
