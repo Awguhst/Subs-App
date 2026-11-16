@@ -22,6 +22,38 @@ class BudgetError(ValueError):
     pass
 
 
+@contextmanager
+def exclusive_lock(path: Path):
+    """Serialise access to ``path`` across threads and processes (via ``<path>.lock``).
+
+    Shared by the spending cap below and the spending records in costs.py."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _locks_guard:
+        lock = _locks.setdefault(str(path.resolve()), RLock())
+    with lock:
+        with path.with_suffix(".lock").open("a+b") as handle:
+            handle.seek(0, 2)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 class BudgetLedger:
     def __init__(self, path: Path, cap_usd=20):
         self.path = Path(path)
@@ -34,33 +66,9 @@ class BudgetLedger:
             raise BudgetError("The translation limit must be between $0.000001 and $20.") from None
         if self.cap < 1:
             raise BudgetError("The translation limit is too small.")
-        with _locks_guard:
-            self.lock = _locks.setdefault(str(self.path.resolve()), RLock())
 
-    @contextmanager
     def _locked(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.lock:
-            with self.path.with_suffix(".lock").open("a+b") as handle:
-                handle.seek(0, 2)
-                if handle.tell() == 0:
-                    handle.write(b"0")
-                    handle.flush()
-                handle.seek(0)
-                if os.name == "nt":
-                    import msvcrt
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                else:
-                    import fcntl
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                try:
-                    yield
-                finally:
-                    handle.seek(0)
-                    if os.name == "nt":
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return exclusive_lock(self.path)
 
     def _read(self):
         if not self.path.exists():

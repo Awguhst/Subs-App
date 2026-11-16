@@ -44,6 +44,10 @@ def media_files(tmp_path_factory):
         ffmpeg(*tone, "-t", str(seconds), "-c:a", "libmp3lame", "-b:a", "32k", "-write_xing", "0", str(rest))
         files[name] = folder / f"{name}.mp3"
         files[name].write_bytes(start.read_bytes() + rest.read_bytes())
+    # A tone with one second of digital silence in the middle, like the cut
+    # between an advert and a programme.
+    files["gapped"] = folder / "gapped.m4a"
+    ffmpeg(*tone, "-t", "3", "-af", "volume=enable='between(t,1,2)':volume=0", "-c:a", "aac", str(files["gapped"]))
     files["playlist"] = folder / "evil.m3u8"
     files["playlist"].write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\n{files['audio'].name}\n#EXT-X-ENDLIST\n")
     files["text"] = folder / "notes.mp4"

@@ -19,7 +19,9 @@ from typing import Any, Callable
 
 from . import media, subtitles
 from .config import Settings
-from .elevenlabs import TranscriptionError
+from .costs import EMPTY_COST, CostTracker, Media, billed_audio_seconds
+from .elevenlabs import MODEL as STT_MODEL, TranscriptionError
+from .breaks import MODEL as BREAKS_MODEL, BreakDetectionError
 from .translation import MODEL as TRANSLATION_MODEL, TranslationError
 from .uploads import Upload
 
@@ -82,12 +84,15 @@ class ResultCache:
     def put(self, key: str, entry: dict):
         if not self.enabled:
             return
-        if entry.get("en") is None:
-            # Never let a Bulgarian-only write discard an English track that
-            # another request already produced for the same transcript.
+        if entry.get("en") is None or entry.get("breaks") is None:
+            # Never let a write for one option discard what another request
+            # already produced for the same transcript (the English track, or
+            # the programme/break blocks).
             old = self.get(key)
-            if old and old.get("en") and old.get("bg") == entry.get("bg"):
-                entry = {**entry, "en": old["en"], "en_model": old.get("en_model")}
+            if old and old.get("bg") == entry.get("bg"):
+                for name in ("en", "breaks"):
+                    if entry.get(name) is None and old.get(name) is not None:
+                        entry = {**entry, name: old[name], f"{name}_model": old.get(f"{name}_model")}
         self.directory.mkdir(parents=True, exist_ok=True)
         temporary = self._path(key).with_suffix(f".{os.getpid()}.tmp")
         temporary.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
@@ -105,24 +110,26 @@ class ResultCache:
 
 
 class SubtitleService:
-    def __init__(self, settings: Settings, transcriber, translator):
+    def __init__(self, settings: Settings, transcriber, translator, detector=None, costs=None):
         self.settings = settings
         self.transcriber = transcriber   # async (audio_path) -> Scribe JSON
-        self.translator = translator     # .translate(texts, label, on_progress) -> list[str]
+        self.translator = translator     # .translate(texts, label, on_progress, media) -> list[str]
+        self.detector = detector         # .detect(cues, silences, duration, label, media) -> list[block]
+        self.costs = costs or CostTracker.from_settings(settings)   # what every provider request cost
         self.cache = ResultCache(settings.data_dir / "cache", settings.cache_ttl_hours)
         self.slots = asyncio.Semaphore(settings.max_concurrent_jobs)
-        self.jobs: dict[str, Job] = {}                       # "<sha>:<translate>" -> whole request job
+        self.jobs: dict[str, Job] = {}                       # "<sha>:<translate>:<breaks>" -> request job
         self.transcriptions: dict[str, asyncio.Task] = {}    # "<sha>" -> shared transcription
 
     # ----- job management -------------------------------------------------
-    def submit(self, upload: Upload, translate: bool) -> Job:
+    def submit(self, upload: Upload, translate: bool, breaks: bool = False) -> Job:
         """Start processing, or join an identical upload that is already running."""
-        key = f"{upload.sha256}:{int(translate)}"
+        key = f"{upload.sha256}:{int(translate)}:{int(breaks)}"
         if key in self.jobs:
             shutil.rmtree(upload.path.parent, ignore_errors=True)
             return self.jobs[key]
         job = Job()
-        job.task = task = asyncio.create_task(self._process(upload, translate, job.emit))
+        job.task = task = asyncio.create_task(self._process(upload, translate, breaks, job.emit))
         self.jobs[key] = job
 
         def finished(_):
@@ -143,8 +150,10 @@ class SubtitleService:
         return self.cache.get(sha256), progress
 
     # ----- the pipeline ---------------------------------------------------
-    async def _process(self, upload: Upload, translate: bool, emit: Callable[[Event], None]) -> dict:
+    async def _process(self, upload: Upload, translate: bool, breaks: bool,
+                       emit: Callable[[Event], None]) -> dict:
         started = time.perf_counter()
+        since = CostTracker.now()   # provider requests recorded from here on are this request's
         timings: dict[str, int] = {}
 
         def lap(name: str, since: float) -> float:
@@ -164,11 +173,20 @@ class SubtitleService:
                     translation = await self._translate(upload, entry, emit, lap)
                 else:
                     translation = {"status": "complete", "model": entry.get("en_model"), "error": None}
+            detection = {"status": "skipped", "model": None, "error": None}
+            if breaks and entry["cues"]:
+                if entry.get("breaks") is None:
+                    detection = await self._detect_breaks(upload, entry, emit, lap)
+                else:
+                    detection = {"status": "complete", "model": entry.get("breaks_model"), "error": None}
             timings["total"] = round((time.perf_counter() - started) * 1000)
-            result = build_result(entry, translate, translation, cached, timings, upload.filename)
-            log.info("id=%s size=%d duration=%.1fs cues=%d cached=%s translation=%s timings=%s",
-                     upload.sha256[:12], upload.size, entry["duration"] or 0, len(entry["cues"]),
-                     cached, translation["status"], timings)
+            cost = self.costs.cost_of(upload.sha256, since)
+            result = build_result(entry, translate, translation, cached, timings, upload.filename,
+                                  breaks, detection, cost)
+            log.info("id=%s size=%d duration=%.1fs cues=%d cached=%s translation=%s breaks=%s "
+                     "cost=$%.4f timings=%s", upload.sha256[:12], upload.size, entry["duration"] or 0,
+                     len(entry["cues"]), cached, translation["status"], detection["status"],
+                     cost["request"]["usd"], timings)
             return result
         finally:
             shutil.rmtree(upload.path.parent, ignore_errors=True)
@@ -219,11 +237,20 @@ class SubtitleService:
         mark = lap("extract", mark)
 
         emit({"stage": "transcribing", "duration_seconds": round(duration or 0, 1)})
+        # The silences are measured while Scribe works (seconds of CPU, no cost)
+        # and kept with the transcript, so break detection asked for later, even
+        # on a cached result, never needs the media again.
+        silence_scan = asyncio.create_task(asyncio.to_thread(self._silences, audio))
         try:
             transcript = await self.transcriber(audio)
         except TranscriptionError as exc:
+            silence_scan.cancel()
             raise PipelineError(exc.status, self.settings.redact(str(exc))) from None
+        silences = await silence_scan
         mark = lap("transcribe", mark)
+        # Paid now, whatever happens next: recorded before the cues are built.
+        seconds, source = billed_audio_seconds(transcript, duration)
+        self.costs.record_transcription(Media(upload.sha256, upload.filename, duration), STT_MODEL, seconds, source)
 
         emit({"stage": "segmenting"})
         try:
@@ -233,7 +260,16 @@ class SubtitleService:
         lap("segment", mark)
         return {"version": CACHE_VERSION, "id": upload.sha256, "filename": upload.filename,
                 "media_type": info.media_type, "duration": duration, "cues": cues,
-                "bg": subtitles.to_vtt(cues), "en": None, "en_model": None}
+                "bg": subtitles.to_vtt(cues), "en": None, "en_model": None,
+                "silences": silences, "breaks": None, "breaks_model": None}
+
+    @staticmethod
+    def _silences(audio: Path) -> list[list[float]]:
+        try:
+            return [list(pair) for pair in media.detect_silences(audio)]
+        except media.MediaError as exc:
+            log.warning("Silence detection skipped: %s", exc)
+            return []
 
     async def _translate(self, upload: Upload, entry: dict, emit, lap) -> dict:
         mark = time.perf_counter()
@@ -241,7 +277,8 @@ class SubtitleService:
         try:
             english = await self.translator.translate(
                 [cue["text"] for cue in entry["cues"]], label=upload.sha256[:16],
-                on_progress=lambda done, total: emit({"stage": "translating", "completed": done, "total": total}))
+                on_progress=lambda done, total: emit({"stage": "translating", "completed": done, "total": total}),
+                media=Media(upload.sha256, upload.filename, entry["duration"]))
         except TranslationError as exc:
             lap("translate", mark)
             return {"status": "failed", "model": TRANSLATION_MODEL, "error": self.settings.redact(str(exc))}
@@ -255,14 +292,43 @@ class SubtitleService:
         self.cache.put(upload.sha256, entry)
         return {"status": "complete", "model": TRANSLATION_MODEL, "error": None}
 
+    async def _detect_breaks(self, upload: Upload, entry: dict, emit, lap) -> dict:
+        mark = time.perf_counter()
+        emit({"stage": "detecting_breaks"})
+        failed = {"status": "failed", "model": BREAKS_MODEL, "error": None}
+        try:
+            found = await self.detector.detect(entry["cues"], entry.get("silences") or [],
+                                               entry["duration"], label=upload.sha256[:16],
+                                               media=Media(upload.sha256, upload.filename, entry["duration"]))
+        except BreakDetectionError as exc:
+            lap("detect_breaks", mark)
+            return {**failed, "error": self.settings.redact(str(exc))}
+        except Exception:
+            log.exception("Break detection failed unexpectedly")
+            lap("detect_breaks", mark)
+            return {**failed, "error": "Programme/break detection failed unexpectedly."}
+        lap("detect_breaks", mark)
+        entry.update(breaks=found, breaks_model=BREAKS_MODEL)
+        self.cache.put(upload.sha256, entry)
+        return {"status": "complete", "model": BREAKS_MODEL, "error": None}
+
+
+SKIPPED = {"status": "skipped", "model": None, "error": None}
+
 
 def build_result(entry: dict, translate: bool, translation: dict, cached: bool,
-                 timings: dict[str, int], filename: str | None = None) -> dict:
+                 timings: dict[str, int], filename: str | None = None,
+                 breaks: bool = False, detection: dict | None = None, cost: dict | None = None) -> dict:
     if translate and not entry["cues"]:
-        translation = {"status": "skipped", "model": None, "error": None}
+        translation = dict(SKIPPED)
     english = entry.get("en") if translate else None
     if translate and not entry["cues"]:
         english = "WEBVTT\n"
+    detection = dict(detection or SKIPPED)
+    blocks = entry.get("breaks") if breaks else None
+    if breaks and not entry["cues"]:
+        blocks, detection = [], dict(SKIPPED)
+    program = next((b["start"] for b in blocks or [] if b["kind"] == "program"), None)
     return {
         "id": entry["id"],
         "filename": filename or entry.get("filename") or "upload",
@@ -271,6 +337,8 @@ def build_result(entry: dict, translate: bool, translation: dict, cached: bool,
         "cue_count": len(entry["cues"]),
         "subtitles": {"bg": entry["bg"], "en": english},
         "translation": translation,
+        "breaks": {**detection, "program_starts": program, "blocks": blocks},
         "cached": cached,
+        "cost": cost or EMPTY_COST,
         "timings_ms": timings,
     }

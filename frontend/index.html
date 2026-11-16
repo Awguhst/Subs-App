@@ -10,6 +10,7 @@
     --bg: #0c0d13; --panel: #12131c; --panel-2: #181a25; --line: #262837; --line-2: #343749;
     --ink: #f0f1f7; --muted: #a1a3b8; --accent: #a78bfa; --accent-ink: #171025;
     --ok: #65d1aa; --warn: #d4ab70; --err: #f19a9a;
+    --el: #20a899; --an: #8f71f0;   /* ElevenLabs, Claude: marks only, never text */
     --mono: "Cascadia Code", ui-monospace, SFMono-Regular, Consolas, monospace;
   }
   * { box-sizing: border-box; }
@@ -67,8 +68,36 @@
   .tracks article { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0f1018; }
   .tracks header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
   .tracks header div { display: flex; gap: 6px; } .tracks header button { font-size: 12px; padding: 5px 10px; }
+  .breaks { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #0f1018; margin: 0 0 16px; }
+  .breaks header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  .breaks header button { font-size: 12px; padding: 5px 10px; }
+  .breaks table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  .breaks th, .breaks td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .breaks tr:last-child td { border-bottom: 0; } .breaks th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .breaks td:first-child, .breaks td:nth-child(2) { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .breaks .kind { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; margin-right: 6px; }
+  .breaks .kind.program { background: #163a2a; color: #7fe3b0; } .breaks .kind.break { background: #3a2316; color: #f0b27a; }
+  .breaks td button { font-size: 12px; padding: 4px 9px; }
   pre { margin: 0; padding: 14px; max-height: 360px; overflow: auto; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; color: #d9dbe8; }
   .code { border: 1px solid var(--line); border-radius: 10px; background: #0f1018; margin-top: 16px; max-height: none; }
+  .head-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .head-tools button { font-size: 12px; padding: 5px 10px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 0 0 12px; }
+  .tile { display: grid; gap: 2px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #0f1018; }
+  .tile-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+  .tile-value { font-size: 24px; font-weight: 600; letter-spacing: -.4px; font-variant-numeric: tabular-nums; }
+  .tile-note { color: var(--muted); font-size: 12.5px; }
+  .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+  .dot.el, .split .el { background: var(--el); } .dot.an, .split .an { background: var(--an); }
+  .split { display: flex; gap: 2px; height: 8px; margin: 0 0 16px; border-radius: 99px; overflow: hidden; }
+  .split span { flex: 0 1 0; min-width: 0; }
+  .spend { margin: 0 0 12px; overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: #0f1018; }
+  .spend table { width: 100%; min-width: 640px; border-collapse: collapse; font-size: 14px; }
+  .spend th, .spend td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .spend th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .spend tr:last-child td { border-bottom: 0; }
+  .spend .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .spend td.file { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -89,6 +118,7 @@
       </label>
       <div class="row">
         <label class="check"><input type="checkbox" id="translate" checked> Include English translation</label>
+        <label class="check"><input type="checkbox" id="find-breaks"> Find the show and the commercial breaks</label>
         <label class="key" id="key-row" hidden>API key <input id="key" type="password" autocomplete="off" spellcheck="false"></label>
       </div>
       <button id="submit" class="primary" type="submit" disabled>Generate subtitles</button>
@@ -109,10 +139,34 @@
       <button type="button" data-track="en" aria-pressed="false">English</button>
       <button type="button" data-track="off" aria-pressed="false">Off</button>
     </div>
+    <article class="breaks" id="breaks" hidden>
+      <header><h3>Show and commercial breaks</h3><div><button type="button" id="copy-blocks">Copy JSON</button></div></header>
+      <table><thead><tr><th>From</th><th>To</th><th>What</th><th></th></tr></thead><tbody id="blocks-body"></tbody></table>
+    </article>
     <div class="tracks">
       <article><header><h3>Bulgarian</h3><div><button type="button" data-copy="bg">Copy</button><button type="button" data-download="bg">Download .vtt</button></div></header><pre id="vtt-bg"></pre></article>
       <article><header><h3>English</h3><div><button type="button" data-copy="en">Copy</button><button type="button" data-download="en">Download .vtt</button></div></header><pre id="vtt-en"></pre></article>
     </div>
+  </section>
+
+  <section class="card" id="spending" aria-labelledby="spending-title">
+    <div class="result-head">
+      <h2 id="spending-title">Spending</h2>
+      <div class="head-tools"><p class="muted">Every provider request at list prices, since this server first ran.</p><button type="button" id="spend-refresh">Refresh</button></div>
+    </div>
+    <div class="tiles" role="list">
+      <div class="tile" role="listitem"><span class="tile-label">Total spent</span><strong class="tile-value" id="spend-total">–</strong><span class="tile-note" id="spend-total-note">&nbsp;</span></div>
+      <div class="tile" role="listitem"><span class="tile-label"><i class="dot el"></i>ElevenLabs · transcription</span><strong class="tile-value" id="spend-el">–</strong><span class="tile-note" id="spend-el-note">&nbsp;</span></div>
+      <div class="tile" role="listitem"><span class="tile-label"><i class="dot an"></i>Claude · translation and breaks</span><strong class="tile-value" id="spend-an">–</strong><span class="tile-note" id="spend-an-note">&nbsp;</span></div>
+    </div>
+    <div class="split" id="split" aria-hidden="true" hidden><span class="el"></span><span class="an"></span></div>
+    <div class="spend" id="spend-table" hidden>
+      <table>
+        <thead><tr><th>File</th><th>Length</th><th class="num">Transcription</th><th class="num">Translation</th><th class="num">Breaks</th><th class="num">Total</th><th>Last request</th></tr></thead>
+        <tbody id="spend-body"></tbody>
+      </table>
+    </div>
+    <p id="spend-note" class="muted" style="margin: 0"></p>
   </section>
 
   <section class="card" aria-labelledby="code-title">
@@ -127,8 +181,9 @@ const $ = (id) => document.getElementById(id);
 const STAGES = {
   queued: "Waiting for a free worker", probing: "Reading the file", extracting: "Extracting audio",
   transcribing: "Transcribing Bulgarian speech", segmenting: "Building subtitle cues", translating: "Translating to English",
+  detecting_breaks: "Finding the show and the commercial breaks",
 };
-const STAGE_BAR = { queued: 32, probing: 34, extracting: 38, transcribing: 45, segmenting: 82, translating: 84 };
+const STAGE_BAR = { queued: 32, probing: 34, extracting: 38, transcribing: 45, segmenting: 82, translating: 84, detecting_breaks: 96 };
 const state = { file: null, busy: false, result: null, resultFile: null, urls: [], trackUrls: {}, timer: null, health: null };
 
 function fmtSize(bytes) {
@@ -141,6 +196,27 @@ function fmtTime(seconds) {
   const m = Math.floor(seconds / 60), s = seconds % 60;
   return m ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
 }
+function fmtClock(seconds) {  // 01:17.3, 1:02:05.0
+  const total = Math.max(0, seconds || 0);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = (total % 60).toFixed(1).padStart(4, "0");
+  return (h ? `${h}:` : "") + `${String(m).padStart(2, "0")}:${s}`;
+}
+const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
+function fmtUsd(value) { return !value ? "$0.00" : value < 0.0001 ? "<$0.0001" : usd.format(value); }
+function fmtCount(value) {  // 1,284 · 12.9K · 1.2M
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+  if (value >= 1e4) return `${(value / 1e3).toFixed(1)}K`;
+  return value.toLocaleString("en-US");
+}
+function fmtHours(seconds) {
+  const minutes = seconds / 60;
+  return minutes >= 90 ? `${(minutes / 60).toFixed(1)} h` : `${minutes.toFixed(1)} min`;
+}
+function fmtWhen(iso) {
+  const date = new Date(iso);
+  return isNaN(date) ? "" : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+function plural(count, noun) { return `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`; }
 function showError(message) { $("error").textContent = message; $("error").hidden = !message; }
 function setBar(percent, busy) { $("bar").style.width = `${Math.min(100, percent)}%`; $("bar-wrap").classList.toggle("busy", !!busy); }
 
@@ -170,6 +246,7 @@ function renderSnippet() {
     `${curl} "${api}?format=vtt&language=bg" -o recording.bg.vtt`,
     `${curl} "${api}?format=vtt&language=en" -o recording.en.vtt`,
     `${curl} "${api}"`,
+    `${curl} "${api}?breaks=true"`,
     `${curl} -N "${api}?stream=true"`,
   ].join("\n\n");
 }
@@ -194,7 +271,8 @@ function upload(event) {
   clearInterval(state.timer);
   state.timer = setInterval(() => { $("elapsed").textContent = fmtTime((performance.now() - started) / 1000); }, 500);
 
-  const params = new URLSearchParams({ stream: "true", translate: String($("translate").checked) });
+  const params = new URLSearchParams({ stream: "true", translate: String($("translate").checked),
+                                       breaks: String($("find-breaks").checked) });
   const xhr = new XMLHttpRequest();
   xhr.open("POST", `/v1/subtitles?${params}`);
   const key = $("key").value.trim();
@@ -266,10 +344,16 @@ function render(result, file) {
   $("vtt-en").textContent = en ?? (result.translation.status === "failed" ? "No English track (see note above)." : "Not requested.");
   const timing = result.cached ? "reused from an earlier upload" : `processed in ${(result.timings_ms.total / 1000).toFixed(1)} s`;
   const length = result.duration_seconds ? `${fmtTime(result.duration_seconds)} ` : "";
-  $("meta").textContent = `${result.cue_count} cues · ${length}${result.media_type} · ${timing}`;
-  const note = result.translation.status === "failed" ? `English translation failed: ${result.translation.error}` :
-               result.cue_count === 0 ? "No speech was detected in this recording." : "";
-  $("note").textContent = note; $("note").hidden = !note;
+  const cost = result.cost;
+  const spent = cost ? ` · ${cost.request.usd ? `cost ${fmtUsd(cost.request.usd)}` : "no new cost"}`
+                       + ` · ${fmtUsd(cost.media.usd)} for this file so far` : "";
+  $("meta").textContent = `${result.cue_count} cues · ${length}${result.media_type} · ${timing}${spent}`;
+  const notes = [];
+  if (result.translation.status === "failed") notes.push(`English translation failed: ${result.translation.error}`);
+  if (result.breaks?.status === "failed") notes.push(`Break detection failed: ${result.breaks.error}`);
+  if (result.cue_count === 0) notes.push("No speech was detected in this recording.");
+  $("note").textContent = notes.join(" "); $("note").hidden = !notes.length;
+  renderBlocks(result.breaks?.blocks);
   for (const button of document.querySelectorAll("[data-copy='en'],[data-download='en'],[data-track='en']")) button.disabled = !en;
 
   state.urls.forEach((url) => URL.revokeObjectURL(url)); state.urls = []; state.trackUrls = {};
@@ -283,7 +367,107 @@ function render(result, file) {
   setTrack("bg");
   $("result").hidden = false;
   $("result").scrollIntoView({ behavior: "smooth", block: "start" });
+  loadSpending();
 }
+
+// ----- spending -----
+async function loadSpending() {
+  const note = $("spend-note");
+  const headers = { "Content-Type": "application/json" };
+  const key = $("key").value.trim();
+  if (key) headers["X-API-Key"] = key;
+  let data;
+  try {
+    const response = await fetch("/v1/spending", { method: "POST", headers, body: JSON.stringify({ limit: 50 }) });
+    if (response.status === 401) { note.textContent = "Enter the API key above to see what this server has spent."; return; }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    data = await response.json();
+  } catch (error) {
+    note.textContent = `Spending could not be loaded (${error.message}).`;
+    return;
+  }
+  renderSpending(data);
+}
+
+function renderSpending(data) {
+  const el = data.services.elevenlabs, an = data.services.anthropic;
+  $("spend-total").textContent = fmtUsd(data.total_usd);
+  $("spend-total-note").textContent = data.requests
+    ? `${plural(data.requests, "provider request")} · ${plural(data.media_count, "file")}` : "No provider requests yet";
+  $("spend-el").textContent = fmtUsd(el.usd);
+  $("spend-el-note").textContent = el.requests
+    ? `${fmtHours(el.audio_seconds)} of audio · ${plural(el.requests, "request")}` : "No transcriptions yet";
+  $("spend-an").textContent = fmtUsd(an.usd);
+  const tokensIn = an.input_tokens + an.cache_creation_input_tokens + an.cache_read_input_tokens;
+  $("spend-an-note").textContent = an.requests
+    ? `${fmtCount(tokensIn)} tokens in · ${fmtCount(an.output_tokens)} out · ${plural(an.requests, "request")}` : "No Claude requests yet";
+
+  // One whole split into two parts: the share of each provider (a part at zero draws nothing).
+  const split = $("split");
+  split.hidden = !data.total_usd;
+  for (const [name, amount] of [["el", el.usd], ["an", an.usd]]) {
+    const part = split.querySelector(`.${name}`);
+    part.style.flexGrow = amount; part.hidden = !amount;
+  }
+
+  const body = $("spend-body");
+  body.replaceChildren();
+  $("spend-table").hidden = !data.media.length;
+  for (const item of data.media) {
+    const row = document.createElement("tr");
+    const cells = [
+      [item.filename || item.id.slice(0, 12), "file"], [item.duration_seconds ? fmtTime(item.duration_seconds) : "–", ""],
+      [fmtUsd(item.purposes.transcription), "num"], [fmtUsd(item.purposes.translation), "num"],
+      [fmtUsd(item.purposes.breaks), "num"], [fmtUsd(item.usd), "num"], [fmtWhen(item.last_at), ""],
+    ];
+    for (const [text, cls] of cells) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      if (cls) cell.className = cls;
+      if (cls === "file") cell.title = `${item.filename || ""} · ${item.id}`.trim();
+      row.append(cell);
+    }
+    body.append(row);
+  }
+
+  const notes = [`List prices: ElevenLabs Scribe ${usd.format(data.pricing.elevenlabs.scribe_usd_per_audio_hour)} per audio hour; `
+                 + "Claude per million tokens; both from the usage each provider reports."];
+  if (data.media_count > data.media.length) notes.push(`Showing the ${data.media.length} most recently used files of ${data.media_count}.`);
+  if (data.unpriced_requests) notes.push(`${plural(data.unpriced_requests, "request")} could not be priced (unknown model or tier) and count as $0.`);
+  if (data.unrecorded_requests) notes.push(`${plural(data.unrecorded_requests, "request")} could not be written to the records since the server started.`);
+  if (data.last_at) notes.push(`Last provider request ${fmtWhen(data.last_at)}.`);
+  $("spend-note").textContent = notes.join(" ");
+}
+$("spend-refresh").addEventListener("click", loadSpending);
+$("key").addEventListener("change", loadSpending);
+
+const KIND_LABELS = { program: "Show", break: "Commercial break" };
+function renderBlocks(blocks) {
+  const body = $("blocks-body");
+  body.replaceChildren();
+  $("breaks").hidden = !blocks || !blocks.length;
+  for (const block of blocks || []) {
+    const row = document.createElement("tr");
+    const [from, to, what, action] = ["td", "td", "td", "td"].map((tag) => document.createElement(tag));
+    from.textContent = fmtClock(block.start); to.textContent = fmtClock(block.end);
+    const kind = document.createElement("span");
+    kind.className = `kind ${block.kind}`; kind.textContent = KIND_LABELS[block.kind] || block.kind;
+    what.append(kind, document.createTextNode(block.label || ""));
+    const jump = document.createElement("button");
+    jump.type = "button"; jump.textContent = "Play from here";
+    jump.addEventListener("click", () => { const player = $("player"); player.currentTime = block.start; player.play(); });
+    action.append(jump);
+    row.append(from, to, what, action);
+    body.append(row);
+  }
+}
+$("copy-blocks").addEventListener("click", async () => {
+  if (!state.result?.breaks?.blocks) return;
+  const button = $("copy-blocks");
+  try { await navigator.clipboard.writeText(JSON.stringify(state.result.breaks, null, 2)); button.textContent = "Copied"; }
+  catch { button.textContent = "Copy failed"; }
+  setTimeout(() => { button.textContent = "Copy JSON"; }, 1500);
+});
 
 // Only the selected language is attached to the player. Browsers draw every
 // "showing" track at once, and their automatic caption selection (driven by
@@ -339,6 +523,7 @@ drop.addEventListener("drop", (e) => { e.preventDefault(); pickFile(e.dataTransf
 $("form").addEventListener("submit", upload);
 $("key").value = localStorage.getItem("subtitle-api-key") || "";
 loadHealth();
+loadSpending();
 </script>
 </body>
 </html>

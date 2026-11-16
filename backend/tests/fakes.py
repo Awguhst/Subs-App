@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import anthropic
 import httpx2
 
+from app.breaks import MODEL as BREAKS_MODEL
 from app.translation import MODEL
 
 BULGARIAN = "Здравейте на всички! Днес ще играем една много интересна игра. Хайде да започваме."
@@ -29,12 +30,24 @@ class FakeTranscriber:
         return self.result
 
 
-def claude_response(items, *, model=MODEL, stop_reason="end_turn", input_tokens=500, output_tokens=100):
+def claude_json(payload, *, model, stop_reason="end_turn", input_tokens=500, output_tokens=100, thinking=False):
+    content = [SimpleNamespace(type="thinking", thinking="…")] if thinking else []
+    content.append(SimpleNamespace(type="text", text=json.dumps(payload, ensure_ascii=False)))
     return SimpleNamespace(
         model=model, stop_reason=stop_reason,
         usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens,
                               cache_creation_input_tokens=None, cache_read_input_tokens=None),
-        content=[SimpleNamespace(type="text", text=json.dumps({"translations": items}, ensure_ascii=False))])
+        content=content)
+
+
+def claude_response(items, *, model=MODEL, stop_reason="end_turn", input_tokens=500, output_tokens=100):
+    return claude_json({"translations": items}, model=model, stop_reason=stop_reason,
+                       input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def breaks_response(blocks, *, model=BREAKS_MODEL, **extra):
+    """What Claude Haiku 5.5 answers for a break-detection request (with a thinking block)."""
+    return claude_json({"blocks": blocks}, model=model, thinking=True, **extra)
 
 
 def cues_of(request: dict) -> list[dict]:
@@ -43,6 +56,15 @@ def cues_of(request: dict) -> list[dict]:
 
 def echo(request: dict):
     return claude_response([{"id": c["id"], "text": f"EN {c['text']}"} for c in cues_of(request)])
+
+
+def with_breaks(blocks, translation=echo):
+    """A handler that answers translation requests normally and break detection with ``blocks``."""
+    def handler(request: dict):
+        if request["model"] == BREAKS_MODEL:
+            return breaks_response(blocks)
+        return translation(request)
+    return handler
 
 
 def api_error(cls, status: int):
@@ -74,5 +96,5 @@ class FakeAnthropic:
         pass
 
 
-__all__ = ["BULGARIAN", "FakeAnthropic", "FakeTranscriber", "anthropic", "api_error", "claude_response",
-           "cues_of", "echo", "scribe"]
+__all__ = ["BULGARIAN", "FakeAnthropic", "FakeTranscriber", "anthropic", "api_error", "claude_json",
+           "claude_response", "cues_of", "echo", "scribe", "breaks_response", "with_breaks"]

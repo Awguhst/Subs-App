@@ -4,9 +4,11 @@ Upload an audio or video recording with Bulgarian speech; get back **Bulgarian a
 
 - **Speech-to-text:** ElevenLabs Scribe v2 with word timestamps, segmented into readable cues (two lines of at most 42 characters, split on pauses, speaker changes and sentences).
 - **Translation:** Claude Haiku 4.5 translates every cue. The English track has exactly the same cue timings as the Bulgarian one.
+- **Where the show starts and the commercial breaks are:** with `?breaks=true`, Claude Haiku 5.5 reads the transcript and the result also says where the show starts and lists the `program` / `break` blocks with start and end times, placed at the silences measured in the audio. About one cent per hour of video.
 - **Any device:** multipart form upload or raw bytes. The format is detected from the content: MP4, MOV, MKV, WebM, AVI, 3GP, MP3, M4A, AAC, WAV, FLAC, OGG/Opus, AMR, CAF, WMA and more.
 - **Fast:** streaming uploads, ~1 s of audio extraction per 10 minutes of media, parallel translation batches, and instant cached results for repeat uploads.
 - **Ready for Railway:** a single Dockerfile, `$PORT`, a `/health` check and persistent volume support. Interactive docs are at `/docs`, and an optional test page is at `/`.
+- **Spending you can see:** every ElevenLabs and Claude request is priced from the usage the provider reports, at the published list prices, and kept on disk. Each result says what it cost, `POST /v1/spending` gives the totals per service, purpose, model and recording, and the test page shows them.
 
 ```text
 upload ──► FFprobe/FFmpeg ──► 16 kHz mono MP3 ──► ElevenLabs Scribe v2 ──► cues ──► bg.vtt
@@ -35,7 +37,7 @@ The repository deploys as-is: Railway builds the `Dockerfile` and the app listen
    - `ELEVENLABS_API_KEY`: ElevenLabs secret key with Speech-to-Text access (starts with `sk_`).
    - `ANTHROPIC_API_KEY`: needed for the English track.
    - `API_KEYS`: one or more long random strings, comma-separated, that clients must send. **Set this.** Without it, anyone who finds the URL can spend your provider credit.
-3. **Add a volume** mounted at **`/data`**. This keeps the translation spending ledger and the result cache across deploys. Without a volume, both reset on every deploy, and the startup log warns about it.
+3. **Add a volume** mounted at **`/data`**. This keeps the translation spending ledger, the spending records and the result cache across deploys. Without a volume, all three reset on every deploy, and the startup log warns about it.
 4. Under **Settings → Deploy**, set the healthcheck path to **`/health`**.
 5. Under **Settings → Networking**, select **Generate Domain**. The API is now at `https://<name>.up.railway.app`.
 
@@ -81,6 +83,7 @@ Send the file as `multipart/form-data` in a field named `file`, or send the raw 
 | `stream` | `false` | `true` returns NDJSON progress events and then the result (see below) |
 | `format` | `json` | `vtt` returns one ready-to-use `.vtt` file instead of JSON (see below) |
 | `language` | – | `bg` or `en`: which file to return when `format=vtt` |
+| `breaks` | `false` | `true` also finds where the show starts and where the commercial breaks are (see below; JSON only) |
 
 #### Ready-to-use `.vtt` files: two requests
 
@@ -111,14 +114,44 @@ curl -X POST "$BASE_URL/v1/subtitles" -H "X-API-Key: $API_KEY" -F "file=@recordi
     "en": "WEBVTT\n\n1\n00:00:01.200 --> 00:00:03.400\nHey everyone!\n\n2\n..."
   },
   "translation": { "status": "complete", "model": "claude-haiku-4-5-20251001", "error": null },
+  "breaks": { "status": "skipped", "model": null, "error": null, "program_starts": null, "blocks": null },
   "cached": false,
+  "cost": {
+    "currency": "USD",
+    "request": { "usd": 0.018575, "services": { "elevenlabs": 0.017356, "anthropic": 0.001219 }, "requests": 4 },
+    "media": { "usd": 0.018575, "services": { "elevenlabs": 0.017356, "anthropic": 0.001219 }, "requests": 4 }
+  },
   "timings_ms": { "extract": 610, "transcribe": 18400, "segment": 4, "translate": 6900, "total": 25950 }
 }
 ```
 
 - `id` is the SHA-256 of the uploaded bytes. Uploading the same file again returns the stored result immediately, without any provider cost (`cached: true`), for `CACHE_TTL_HOURS`.
+- `cost.request` is what this request's provider calls cost at list prices (all zero for a cached result); `cost.media` is everything ever spent on this file. See [Costs](#costs-and-the-translation-spending-cap).
 - `translation.status` is `complete`, `skipped` (not requested, or no speech) or `failed`. **If only the translation fails, the request still succeeds**: `subtitles.en` is `null` and `translation.error` says why.
 - A recording without speech returns empty tracks (`"WEBVTT\n"`) and `cue_count: 0`.
+
+#### Where the show starts and the commercial breaks are (`?breaks=true`)
+
+```bash
+curl -X POST "$BASE_URL/v1/subtitles?breaks=true" -H "X-API-Key: $API_KEY" -F "file=@recording.mp4"
+```
+
+The result's `breaks` object then says where the show starts (`program_starts`) and carries `blocks`: the whole recording split into consecutive `program` (the show itself) and `break` (adverts plus the channel's own promos and trailers) blocks, in seconds:
+
+```json
+"breaks": {
+  "status": "complete", "model": "claude-haiku-5-5", "error": null,
+  "program_starts": 77.27,
+  "blocks": [
+  { "start": 0.0,    "end": 77.27,   "kind": "break",   "label": "Adverts: Лидл; promos Просто секс, Пееш или лъжеш",        "transition": null },
+  { "start": 77.27,  "end": 759.44,  "kind": "program", "label": "Битката на звездите",                                       "transition": [68.16, 86.38] },
+  { "start": 759.44, "end": 924.45,  "kind": "break",   "label": "Promos Събуди се; Adverts: Техмарт, Артес, Белбитал, Лидл", "transition": [756.24, 762.63] },
+  { "start": 924.45, "end": 1110.22, "kind": "program", "label": "Unnamed programme (film/series)",                           "transition": [923.43, 925.47] }
+  ]
+}
+```
+
+How it works: Claude Haiku 5.5 reads the Bulgarian transcript (no second speech recognition) as numbered lines: the subtitle cues, plus a marker line for every stretch without speech of 15 s or more and for every silence of at least 1 s measured in the audio between two cues (a broadcast switch between an advert and the programme leaves such a silence; speech never does). Claude names the line where each block starts, so it can only point at speech or at a gap that was really there. The server converts that into times and moves each boundary from the nearest speech to the real cut: `transition` is the window between the last speech before the change and the first speech after it, and `start` is the middle of the longest silence measured in the audio inside that window (or the middle of the window when there is none). A programme that resumes with music or a song is found through its marker line; a block that contains no speech at all *and* sits between two blocks of the other kind (a music-only advert in the middle of the show) still cannot be told apart from its neighbours. The blocks are stored with the transcript, so later requests for the same file (and `GET /v1/subtitles/{id}/breaks`) cost nothing. If only the detection fails, the request still succeeds with `breaks.blocks: null` and the reason in `breaks.error`. `breaks=true` cannot be combined with `format=vtt`.
 
 | Status | Meaning |
 | --- | --- |
@@ -144,7 +177,7 @@ The response is `application/x-ndjson`: one JSON object per line. It starts with
 {"event": "result", "result": { …same object as the JSON response… }}
 ```
 
-The stages are `queued`, `probing`, `extracting`, `transcribing`, `segmenting` and `translating`. An `error` event carries `status` and `detail` like the HTTP errors above. HTTP status codes still apply to problems detected before processing starts (401, 413 on size, 503).
+The stages are `queued`, `probing`, `extracting`, `transcribing`, `segmenting`, `translating` and, with `breaks=true`, `detecting_breaks`. An `error` event carries `status` and `detail` like the HTTP errors above. HTTP status codes still apply to problems detected before processing starts (401, 413 on size, 503).
 
 ### Other endpoints
 
@@ -152,6 +185,9 @@ The stages are `queued`, `probing`, `extracting`, `transcribing`, `segmenting` a
 | --- | --- |
 | `GET /v1/subtitles/{id}` | The finished result for an `id` (200), `202 {"status": "processing", "stage": …}` while running, 404 if unknown/expired |
 | `GET /v1/subtitles/{id}/bg.vtt` · `/en.vtt` | One track as a downloadable `.vtt` file (202 while still processing, 404 if unknown) |
+| `GET /v1/subtitles/{id}/breaks` | Where the show starts (`program_starts`) and the `program` / `break` blocks of a recording processed with `breaks=true` (202 while processing, 404 if not detected) |
+| `POST /v1/spending` | What the provider requests have cost: totals per service, purpose, model and recording. Optional JSON body `{"since", "until", "media_id", "limit"}` |
+| `POST /v1/spending/media` | One recording's spending, request by request; body `{"id": "<sha256>"}` (404 when nothing was recorded for it) |
 | `GET /v1/usage` | Translation spending against the lifetime cap |
 | `GET /health` | Configuration and readiness (always 200 while the server is up) |
 
@@ -203,7 +239,7 @@ CORS is open (`CORS_ORIGINS=*`) by default, so web apps on any origin can call t
 
 ## Web test page
 
-`/` serves a single static page ([frontend/index.html](frontend/index.html); no build step). It lets you upload or drag in a file, watch upload and processing progress, play the media with **Bulgarian / English / Off** subtitles, and copy or download each `.vtt`. The page asks for an API key when the server requires one and stores it in the browser. Set `ENABLE_WEB_UI=false` to serve only the API; `/` then redirects to `/docs`.
+`/` serves a single static page ([frontend/index.html](frontend/index.html); no build step). It lets you upload or drag in a file, watch upload and processing progress, play the media with **Bulgarian / English / Off** subtitles, and copy or download each `.vtt`. Each result says what it cost, and a **Spending** card shows the total spent on this server, the split between ElevenLabs and Claude, and a per-file table (transcription, translation, breaks). The page asks for an API key when the server requires one and stores it in the browser. Set `ENABLE_WEB_UI=false` to serve only the API; `/` then redirects to `/docs`.
 
 ## Configuration
 
@@ -222,9 +258,10 @@ Set these as environment variables (Railway variables) or in `.env` for local ru
 | `CACHE_TTL_HOURS` | `168` | How long results are reused; `0` disables the cache |
 | `ELEVENLABS_TIMEOUT_SECONDS` | `1800` | Transcription read timeout |
 | `ANTHROPIC_TIMEOUT_SECONDS` | `120` | Per translation request |
+| `ELEVENLABS_STT_USD_PER_HOUR` | `0.20` | Scribe v2 list price used to price transcriptions, USD per audio hour |
 | `CORS_ORIGINS` | `*` | Allowed browser origins |
 | `ENABLE_WEB_UI` | `true` | Serve the test page at `/` |
-| `DATA_DIR` | `./data` (`/data` in Docker; the Railway volume path if one is attached) | Spending ledger, result cache and temporary uploads |
+| `DATA_DIR` | `./data` (`/data` in Docker; the Railway volume path if one is attached) | Spending ledger, spending records, result cache and temporary uploads |
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | Listening address (Railway sets `PORT`) |
 | `LOG_LEVEL` | `info` | Server log level |
 | `FFMPEG_BIN` / `FFPROBE_BIN` | from PATH | Custom FFmpeg executables |
@@ -240,9 +277,29 @@ Set these as environment variables (Railway variables) or in `.env` for local ru
 
 ## Costs and the translation spending cap
 
-ElevenLabs bills transcription per audio minute to your account; check its pricing and limits there. Anthropic translation runs on **Claude Haiku 4.5** ($1 / $5 per million input/output tokens), pinned so the cost accounting stays exact.
+### What has been spent
 
-Every Claude request first **reserves its worst-case cost** in a persistent ledger (`DATA_DIR/translation-budget.json`, or the earlier `DATA_DIR/jobs/.translation-budget.json` when it exists), then settles to the reported usage. A reservation is made only when a request is about to be sent, so at most `TRANSLATION_CONCURRENCY` worst cases are held at once. A failed batch (rate limit, overload, server error, timeout or missing lines) gets up to three attempts in total, and only the missing lines are requested again. Rate-limited and overloaded attempts are not charged. Attempts whose outcome is unknown (timeouts, server errors, cancellations) keep their full reservation. If one batch fails for good, no further requests are sent for that recording. When the next request would exceed `TRANSLATION_BUDGET_USD`, translation stops and only Bulgarian is returned (`translation.status: "failed"`). The ledger never resets by itself; do not edit or delete it to regain budget. `GET /v1/usage` shows the totals.
+Every provider request is priced from the usage the provider reports and recorded, so the server can say what it has spent:
+
+- **ElevenLabs Scribe v2:** the `audio_duration_secs` in the response (or the measured length of the audio that was sent, when the response has none) at the API list price of **$0.20 per audio hour**, billed in US dollars pro rata ([elevenlabs.io/pricing/api](https://elevenlabs.io/pricing/api), checked 2026-11-16). Set `ELEVENLABS_STT_USD_PER_HOUR` if your rate differs. The hours included in a plan are not modelled: the amount is the list-price value of the usage.
+- **Claude Haiku 4.5** (translation): $1 / $5 per million input / output tokens; cache writes at 1.25x (5-minute) or 2x (1-hour) the input price, cache reads at 0.1x; from the `usage` of every response.
+- **Claude Haiku 5.5** (break detection): $0.10 / $0.50 per million tokens for prompts up to 100k tokens, $0.50 / $2.50 above that, with the same cache multipliers. Both kinds of request are pinned to standard capacity (`service_tier: standard_only`), so priority-tier rates never apply; a batch request would count at half price.
+
+Each record (`DATA_DIR/costs.jsonl`: one JSON line per provider request, append-only, written under a cross-process lock) keeps the usage, the rates applied and the amount to the nanodollar, so the totals survive restarts and redeploys (on Railway, with a volume). Attempts the provider does not bill (rate limited, rejected, failed before an answer) are not recorded; attempts whose outcome is unknown (timeouts) are not recorded either, so check the provider dashboard after one. A request whose model or tier is not in the price list is recorded with its usage and counted as `$0` (`unpriced_requests`).
+
+- Every result carries `cost.request` (this request's provider calls; zero when served from the cache) and `cost.media` (everything ever spent on the file).
+- `POST /v1/spending` returns the totals: `total_usd`, `services` (`elevenlabs` with the audio seconds, `anthropic` with the token counts), `purposes` (`transcription`, `translation`, `breaks`), `models`, `media` (per recording, most recently used first) and `pricing` (the rates applied). An optional JSON body narrows it: `{"since": "2026-11-01T00:00:00Z", "until": "...", "media_id": "<sha256>", "limit": 50}`.
+- `POST /v1/spending/media` with `{"id": "<sha256>"}` lists every provider request behind one recording, with its usage, rates and amount.
+
+```bash
+curl -X POST "$BASE_URL/v1/spending" -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" -d '{"limit": 20}'
+```
+
+### The translation cap
+
+Translation runs on **Claude Haiku 4.5** and break detection on **Claude Haiku 5.5** (one request covers about 55 minutes of dense speech), both pinned so the accounting stays exact. Measured on an 18.5-minute broadcast recording, break detection cost $0.0018, i.e. about $0.006 per hour of video, on top of the transcription.
+
+The cap is separate from the spending records above and deliberately conservative. Every Claude request (translation and break detection alike) first **reserves its worst-case cost** in a persistent ledger (`DATA_DIR/translation-budget.json`, or the earlier `DATA_DIR/jobs/.translation-budget.json` when it exists), then settles to the reported usage. A reservation is made only when a request is about to be sent, so at most `TRANSLATION_CONCURRENCY` worst cases are held at once. A failed batch (rate limit, overload, server error, timeout or missing lines) gets up to three attempts in total, and only the missing lines are requested again. Rate-limited and overloaded attempts are not charged. Attempts whose outcome is unknown (timeouts, server errors, cancellations) keep their full reservation. If one batch fails for good, no further requests are sent for that recording. When the next request would exceed `TRANSLATION_BUDGET_USD`, translation stops and only Bulgarian is returned (`translation.status: "failed"`). The ledger never resets by itself; do not edit or delete it to regain budget. `GET /v1/usage` shows the totals.
 
 **Each installation has its own ledger.** The local Docker studio has used $0.55 of its $20 so far, and a Railway deployment starts its own $20 allowance. If you run both and want to stay within a €28 total, lower `TRANSLATION_BUDGET_USD` on one of them (for example to `8` on Railway). Railway's ledger only survives redeploys when a volume is attached.
 
@@ -252,7 +309,7 @@ Every Claude request first **reserves its worst-case cost** in a persistent ledg
 - Uploads are identified by content type, never trusted by filename. FFmpeg may only open real audio/video container formats from local files: playlists and indirection formats (HLS, DASH, concat) are refused, so a crafted upload cannot make FFmpeg read server files or URLs.
 - The container runs FFmpeg and the API as an unprivileged user. Temporary files are deleted after each request, and leftovers are cleaned at startup.
 - Provider keys stay on the server and are redacted from error messages.
-- There is no per-client rate limiting. Use separate keys per client and watch `/v1/usage` and your provider dashboards.
+- There is no per-client rate limiting. Use separate keys per client and watch `POST /v1/spending`, `/v1/usage` and your provider dashboards.
 
 ## Local Docker
 
@@ -271,12 +328,14 @@ python -m venv .venv
 cd backend; ..\.venv\Scripts\python.exe -m app      # PORT/HOST from the environment
 ```
 
-The 90 tests run real FFmpeg on synthetic media in the formats phones and browsers produce, with ElevenLabs and Claude replaced by offline fakes, so **tests spend no credits**. They cover:
+The 132 tests run real FFmpeg on synthetic media in the formats phones and browsers produce, with ElevenLabs and Claude replaced by offline fakes, so **tests spend no credits**. They cover:
 
 - the HTTP API end to end: multipart and raw uploads, ready-to-use `.vtt` responses (including Cyrillic filenames), streaming events, caching and de-duplication, auth, limits, error mapping, and cleanup of temporary files;
 - cue segmentation and WebVTT output;
 - translation batching, partial-response recovery, retries and cancellation;
+- programme/break detection: line-numbered answers, marker lines for silences and speechless stretches, blocks that start at a marker, chunking, boundary placement on measured silences, retries, and failures that leave the subtitles intact;
 - the spending ledger;
+- the spending records: pricing from reported usage (cache tiers, the Haiku 5.5 long-context tier, batch), persistence across restarts, damaged lines, concurrent writers, and the `cost` in every result;
 - media detection and the refusal of playlists and non-media.
 
 ## Project layout
@@ -289,7 +348,9 @@ backend/app/media.py        FFprobe inspection and speech-audio extraction (form
 backend/app/elevenlabs.py   Async ElevenLabs Scribe v2 client
 backend/app/subtitles.py    Word timestamps → cues → WebVTT; English line wrapping
 backend/app/translation.py  Concurrent Claude Haiku 4.5 translation with cost reservation
-backend/app/budget.py       Persistent lifetime spending ledger
+backend/app/breaks.py       Programme / commercial-break detection (Claude Haiku 5.5 + measured silences)
+backend/app/budget.py       Persistent lifetime spending ledger (the cap)
+backend/app/costs.py        What every provider request cost, at list prices (append-only records)
 backend/app/config.py       Environment settings
 backend/tests/              Offline test suite (real FFmpeg, fake providers)
 frontend/index.html         Optional test page served at /

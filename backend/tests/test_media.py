@@ -52,3 +52,15 @@ def test_playlists_and_non_media_are_refused(media_files, name):
 def test_extraction_also_refuses_playlists(media_files, tmp_path):
     with pytest.raises(media.MediaError):
         media.extract_audio(media_files["playlist"], tmp_path / "a.mp3", 3.0)
+
+
+def test_silences_are_measured_in_the_extracted_audio(media_files, tmp_path):
+    target = tmp_path / "gapped.mp3"
+    media.extract_audio(media_files["gapped"], target)
+    silences = media.detect_silences(target)
+    assert len(silences) == 1
+    start, end = silences[0]
+    assert start == pytest.approx(1.0, abs=0.15) and end == pytest.approx(2.0, abs=0.15)
+    assert media.detect_silences(target, max_count=1) == silences
+    media.extract_audio(media_files["audio"], tmp_path / "tone.mp3")
+    assert media.detect_silences(tmp_path / "tone.mp3") == []  # an unbroken tone has none

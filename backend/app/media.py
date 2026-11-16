@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -112,3 +113,36 @@ def extract_audio(source: str | Path, target: str | Path, max_seconds: float | N
     if not duration:
         raise MediaError("The audio track is empty.", status=422)
     return duration
+
+
+SILENCE_DB = -40          # quieter than this counts as silence
+SILENCE_MIN_SECONDS = 0.2  # broadcast cuts between adverts and programmes are at least this long
+_SILENCE = re.compile(r"silence_(start|end): (-?[0-9.]+)")
+
+
+def detect_silences(audio: str | Path, max_count: int = 50_000) -> list[tuple[float, float]]:
+    """(start, end) of every quiet stretch in the extracted audio, in seconds.
+
+    Used to place programme/advert boundaries at the real cut rather than at the
+    nearest subtitle cue: a broadcast switch between two items almost always
+    passes through a short near-digital silence, which speech does not.
+    """
+    source = str(Path(audio).resolve())
+    result = _run([_binary("ffmpeg"), "-hide_banner", "-nostdin", "-v", "info", *SAFE_INPUT, "-i", source,
+                   "-af", f"silencedetect=noise={SILENCE_DB}dB:d={SILENCE_MIN_SECONDS}", "-f", "null", "-"],
+                  timeout=1800)
+    if result.returncode:
+        raise MediaError("Silence detection failed. " + result.stderr[-400:].strip(), status=422)
+    silences: list[tuple[float, float]] = []
+    start: float | None = None
+    for kind, value in _SILENCE.findall(result.stderr):
+        moment = max(0.0, round(float(value), 3))
+        if kind == "start":
+            start = moment
+        elif start is not None:
+            if moment > start:
+                silences.append((start, moment))
+            start = None
+        if len(silences) >= max_count:
+            break
+    return silences

@@ -41,6 +41,10 @@ def test_batches_run_in_order_with_context_and_exact_accounting(tmp_path):
     status = translator.budget_status()
     assert status["charged_usd"] == pytest.approx(3 * (500 + 5 * 100) / 1e6)
     assert status["reserved_usd"] == 0
+    assert all(call["service_tier"] == "standard_only" for call in client.calls)
+    spending = translator.costs.summary()   # the same usage at the list prices, kept per request
+    assert spending["requests"] == 3 and spending["total_usd"] == pytest.approx(3 * (500 + 5 * 100) / 1e6)
+    assert spending["media"][0]["id"] == "test" and spending["purposes"]["translation"]["requests"] == 3
 
 
 def test_only_missing_lines_are_requested_again(tmp_path):
@@ -59,6 +63,7 @@ def test_overload_is_retried_and_not_charged(tmp_path):
     assert run(translator, ["Здравей"]) == ["EN Здравей"]
     assert len(client.calls) == 3
     assert translator.budget_status()["charged_usd"] == pytest.approx(0.001)
+    assert translator.costs.summary()["requests"] == 1   # only the answered attempt is recorded
 
 
 def test_server_errors_keep_their_maximum_cost_counted(tmp_path):
@@ -67,6 +72,7 @@ def test_server_errors_keep_their_maximum_cost_counted(tmp_path):
         run(translator, ["Здравей"])
     status = translator.budget_status()
     assert status["reserved_usd"] == 0 and status["charged_usd"] > 0.05  # three uncertain attempts
+    assert translator.costs.summary()["requests"] == 0   # nothing was answered, so nothing is priced
 
 
 def test_bad_key_fails_fast_without_retry(tmp_path):

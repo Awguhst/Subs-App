@@ -57,6 +57,7 @@ class Settings:
     cache_ttl_hours: int = 168
     elevenlabs_timeout_seconds: int = 1800
     anthropic_timeout_seconds: int = 120
+    elevenlabs_usd_per_hour: float = 0.20   # Scribe v2 list price, USD per audio hour
     cors_origins: tuple[str, ...] = ("*",)
     web_ui: bool = True
     frontend_dir: Path = ROOT / "frontend"
@@ -73,6 +74,12 @@ class Settings:
             raise ValueError("TRANSLATION_BUDGET_USD must be a number.") from None
         if not math.isfinite(budget) or not 0 < budget <= 20:
             raise ValueError("TRANSLATION_BUDGET_USD must be above 0 and at most the app's $20 safety cap.")
+        try:
+            scribe_rate = float(os.getenv("ELEVENLABS_STT_USD_PER_HOUR", "").strip() or "0.20")
+        except ValueError:
+            raise ValueError("ELEVENLABS_STT_USD_PER_HOUR must be a number.") from None
+        if not math.isfinite(scribe_rate) or scribe_rate < 0:
+            raise ValueError("ELEVENLABS_STT_USD_PER_HOUR must be 0 or more.")
         return cls(
             elevenlabs_api_key=os.getenv("ELEVENLABS_API_KEY", "").strip(),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
@@ -86,6 +93,7 @@ class Settings:
             cache_ttl_hours=_int("CACHE_TTL_HOURS", 168, 0, 24 * 365),
             elevenlabs_timeout_seconds=_int("ELEVENLABS_TIMEOUT_SECONDS", 1800, 30, 7200),
             anthropic_timeout_seconds=_int("ANTHROPIC_TIMEOUT_SECONDS", 120, 10, 600),
+            elevenlabs_usd_per_hour=scribe_rate,
             cors_origins=_list(os.getenv("CORS_ORIGINS", "*")) or ("*",),
             web_ui=_bool("ENABLE_WEB_UI", True),
         )
@@ -112,6 +120,11 @@ class Settings:
         # using it when present so a redeploy can never reset recorded spend.
         legacy = self.data_dir / "jobs" / ".translation-budget.json"
         return legacy if legacy.exists() else self.data_dir / "translation-budget.json"
+
+    @property
+    def costs_path(self) -> Path:
+        """Append-only record of what every provider request cost (JSON Lines)."""
+        return self.data_dir / "costs.jsonl"
 
     @property
     def secrets(self) -> tuple[str, ...]:

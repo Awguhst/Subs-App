@@ -6,7 +6,9 @@ use one fixed JSON schema, which the API compiles once and then caches.
 
 Each attempt durably reserves its worst-case cost in the persistent spending
 ledger *before* it is sent and settles to the reported usage afterwards, so the
-lifetime cap holds even across crashes, retries and parallel requests.
+lifetime cap holds even across crashes, retries and parallel requests. Every
+answered request is also recorded, with its reported usage priced at the list
+rates, in the spending records (costs.py).
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from anthropic import AsyncAnthropic
 
 from .budget import BudgetError, BudgetLedger
 from .config import Settings
+from .costs import CostTracker, Media
 
 MODEL = "claude-haiku-4-5-20251001"
 # Claude Haiku 4.5 standard rates, in microdollars per token ($1 / $5 per MTok).
@@ -86,9 +89,11 @@ def _clean(text: object) -> str | None:
 
 
 class Translator:
-    def __init__(self, settings: Settings, client: AsyncAnthropic | None = None):
+    def __init__(self, settings: Settings, client: AsyncAnthropic | None = None,
+                 costs: CostTracker | None = None):
         self.settings = settings
         self.ledger = BudgetLedger(settings.ledger_path, settings.translation_budget_usd)
+        self.costs = costs or CostTracker.from_settings(settings)
         if client is None and settings.translation_configured:
             # Retries are done here, not in the SDK, so every attempt is accounted for.
             client = AsyncAnthropic(api_key=settings.anthropic_api_key, max_retries=0,
@@ -108,10 +113,14 @@ class Translator:
         return self.ledger.status()
 
     async def translate(self, texts: Sequence[str], label: str,
-                        on_progress: Callable[[int, int], None] | None = None) -> list[str]:
-        """Return one English line per Bulgarian cue text, in the same order."""
+                        on_progress: Callable[[int, int], None] | None = None,
+                        media: Media | None = None) -> list[str]:
+        """Return one English line per Bulgarian cue text, in the same order.
+
+        ``media`` says which recording the spending records belong to."""
         if self.client is None:
             raise TranslationError("English translation is not configured: set ANTHROPIC_API_KEY on the server.")
+        media = media or Media(label)
         sources = [" ".join(t.split()) for t in texts]
         batches = _batches(sources)
         results: dict[int, str] = {}
@@ -121,7 +130,7 @@ class Translator:
         async def run(batch: list[int]):
             nonlocal completed
             try:
-                results.update(await self._translate_batch(sources, batch, label, failures))
+                results.update(await self._translate_batch(sources, batch, label, failures, media))
             except _Stopped:
                 return
             except (TranslationError, BudgetError) as exc:
@@ -143,7 +152,7 @@ class Translator:
         return [results[i] for i in range(len(sources))]
 
     async def _translate_batch(self, sources: list[str], batch: list[int], label: str,
-                               failures: list) -> dict[int, str]:
+                               failures: list, media: Media) -> dict[int, str]:
         pending, done = list(batch), {}
         first, last = batch[0], batch[-1]
         error = "Claude did not return every subtitle line."
@@ -156,7 +165,7 @@ class Translator:
                 "context_after": sources[last + 1:last + 1 + CONTEXT_CUES],
             }
             try:
-                items = await self._request(payload, label, failures)
+                items = await self._request(payload, label, failures, media)
             except _Retryable as exc:
                 error = str(exc)
                 continue
@@ -170,7 +179,7 @@ class Translator:
                 return done
         raise TranslationError(f"English translation failed: {error}")
 
-    async def _request(self, payload: dict, label: str, failures: list) -> list:
+    async def _request(self, payload: dict, label: str, failures: list, media: Media) -> list:
         content = json.dumps(payload, ensure_ascii=False)
         # Token counts never exceed UTF-8 bytes; doubling plus a fixed allowance
         # for the API's own prompt overhead makes the reservation a safe ceiling
@@ -187,10 +196,13 @@ class Translator:
             # reservation and the request it covers.
             token = self.ledger.reserve(input_bound * INPUT_RATE + MAX_OUTPUT_TOKENS * OUTPUT_RATE, job_id=label)
             try:
+                # Standard capacity only: the spending records price every
+                # request at the standard rates, so no priority tier may apply.
                 response = await self.client.messages.create(
                     model=MODEL, max_tokens=MAX_OUTPUT_TOKENS, system=SYSTEM,
                     messages=[{"role": "user", "content": content}],
-                    output_config={"format": {"type": "json_schema", "schema": SCHEMA}})
+                    output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
+                    service_tier="standard_only")
             except (anthropic.RateLimitError, anthropic.OverloadedError) as exc:
                 settle(token, 0)  # rejected before any processing: not billed
                 raise _Retryable("Anthropic is rate limiting or overloaded.") from exc
@@ -220,6 +232,7 @@ class Translator:
         cost = ((usage.input_tokens or 0) + 2 * (usage.cache_creation_input_tokens or 0)
                 + (usage.cache_read_input_tokens or 0)) * INPUT_RATE + (usage.output_tokens or 0) * OUTPUT_RATE
         settle(token, cost)
+        self.costs.record_anthropic(media, "translation", str(response.model), usage)
 
         if response.stop_reason == "refusal":
             raise TranslationError("Claude declined to translate part of this content.")
